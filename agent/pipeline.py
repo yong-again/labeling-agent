@@ -32,6 +32,8 @@ class LabelingPipeline:
         self.ls_client = LabelStudioClient(config.ls_url, config.ls_api_token)
         self.dino = GroundingDINO(
             model_name=config.dino_model_name,
+            config_path=config.dino_config_path,
+            checkpoint_path=config.dino_checkpoint_path,
             device=config.device,
         )
         self.sam = SAM(

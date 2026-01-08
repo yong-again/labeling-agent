@@ -48,8 +48,10 @@ class Config:
     ls_project_id: Optional[int] = None
     
     # 모델 설정
-    dino_model_name: str = "groundingdino/groundingdino_swinb_cogcoor"
-    sam_model_name: str = "sam_vit_h"  # sam_vit_h, sam_vit_l, sam_vit_b
+    dino_model_name: str = "groundingdino_swint_ogc"
+    dino_config_path: Optional[str] = '/workspace/labeling-agent/agent/model_config/GroundingDINO_SwinT_OGC.py'
+    dino_checkpoint_path: Optional[str] = "/workspace/labeling-agent/weights/groundingdino_swint_ogc.pth"
+    sam_model_name: str = "default"  # default, vit_h, vit_l, vit_b 또는 sam_vit_h, sam_vit_l, sam_vit_b
     sam_checkpoint_path: Optional[str] = None
     
     # 파이프라인 설정
@@ -101,6 +103,8 @@ class Config:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         
         sam_checkpoint = os.getenv("SAM_CHECKPOINT_PATH")
+        dino_config = os.getenv("DINO_CONFIG_PATH")
+        dino_checkpoint = os.getenv("DINO_CHECKPOINT_PATH")
         
         return cls(
             ls_url=ls_url.rstrip("/"),
@@ -108,6 +112,8 @@ class Config:
             ls_project_id=ls_project_id,
             device=device,
             sam_checkpoint_path=sam_checkpoint,
+            dino_config_path=dino_config,
+            dino_checkpoint_path=dino_checkpoint,
             confidence_threshold=float(os.getenv("CONFIDENCE_THRESHOLD", "0.35")),
             batch_size=int(os.getenv("BATCH_SIZE", "1")),
             output_format=os.getenv("OUTPUT_FORMAT", "polygonlabels"),

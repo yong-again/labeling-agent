@@ -5,6 +5,8 @@ Grounding DINO 모델 래퍼
 
 import logging
 from typing import List, Tuple, Optional
+import os
+from pathlib import Path
 import torch
 import numpy as np
 from PIL import Image
@@ -13,6 +15,7 @@ try:
     from groundingdino.util.inference import load_model, load_image, predict, annotate
     from groundingdino.util.slconfig import SLConfig
     from groundingdino.util.utils import clean_state_dict
+    import groundingdino
     GROUNDING_DINO_AVAILABLE = True
 except ImportError:
     GROUNDING_DINO_AVAILABLE = False
@@ -31,11 +34,15 @@ class GroundingDINO:
     def __init__(
         self,
         model_name: str = "groundingdino/groundingdino_swinb_cogcoor",
+        config_path: Optional[str] = None,
+        checkpoint_path: Optional[str] = None,
         device: Optional[str] = None,
     ):
         """
         Args:
-            model_name: 모델 이름 또는 경로
+            model_name: 모델 이름 (config_path가 None일 때 자동으로 config 파일 찾는데 사용)
+            config_path: Config 파일 경로 (None이면 자동으로 찾음)
+            checkpoint_path: Checkpoint 파일 경로 (None이면 자동으로 찾음)
             device: 디바이스 ('cuda' or 'cpu'). None이면 자동 선택
         """
         if not GROUNDING_DINO_AVAILABLE:
@@ -49,16 +56,94 @@ class GroundingDINO:
         
         self.device = device
         self.model_name = model_name
+        self.config_path = config_path
+        self.checkpoint_path = checkpoint_path
         self.model = None
         self._load_model()
+    
+    def _get_config_path(self) -> str:
+        """설정 파일 경로 반환 (예제 패턴: groundingdino/config/GroundingDINO_SwinT_OGC.py)"""
+        # 1. config_path가 명시적으로 제공된 경우 사용
+        if self.config_path and os.path.exists(self.config_path):
+            logger.info(f"지정된 Config 경로 사용: {self.config_path}")
+            return self.config_path
+        
+        # 2. 자동으로 찾기 (모델 이름 기반)
+        model_lower = self.model_name.lower()
+        
+        # 모델 이름에 따라 config 파일 선택
+        if "swinb" in model_lower or "swin_b" in model_lower:
+            config_file = "GroundingDINO_SwinB_cfg.py"
+        elif "swint" in model_lower or "swin_t" in model_lower:
+            config_file = "GroundingDINO_SwinT_OGC.py"
+        else:
+            # 기본값: SwinB
+            config_file = "GroundingDINO_SwinB_cfg.py"
+            logger.warning(f"알 수 없는 모델 이름: {self.model_name}, SwinB config 사용")
+        
+        # GroundingDINO 패키지의 config 디렉터리 찾기
+        groundingdino_dir = os.path.dirname(groundingdino.__file__)
+        config_path = os.path.join(groundingdino_dir, "config", config_file)
+        
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config 파일을 찾을 수 없습니다: {config_path}")
+        
+        return config_path
+    
+    def _get_checkpoint_path(self) -> str:
+        """체크포인트 파일 경로 반환 """
+        # 1. checkpoint_path가 명시적으로 제공된 경우 사용
+        if self.checkpoint_path and os.path.exists(self.checkpoint_path):
+            logger.info(f"지정된 Checkpoint 경로 사용: {self.checkpoint_path}")
+            return self.checkpoint_path
+        
+        # 2. 자동으로 찾기 (프로젝트의 weights 디렉터리에서)
+        project_root = Path(__file__).parent.parent.parent
+        weights_dir = project_root / "weights"
+        
+        # 모델 이름에 따라 체크포인트 파일명 추론
+        model_lower = self.model_name.lower()
+        
+        if "swinb" in model_lower or "swin_b" in model_lower:
+            checkpoint_name = "groundingdino_swinb_cogcoor.pth"
+        elif "swint" in model_lower or "swin_t" in model_lower:
+            checkpoint_name = "groundingdino_swint_ogc.pth"
+        else:
+            checkpoint_name = "groundingdino_swinb_cogcoor.pth"
+        
+        # weights 디렉터리에서 찾기
+        local_checkpoint = weights_dir / checkpoint_name
+        if local_checkpoint.exists():
+            logger.info(f"로컬 체크포인트 사용: {local_checkpoint}")
+            return str(local_checkpoint)
+        
+        # 대체 파일명으로 재시도
+        for alt_name in ["groundingdino_swinb_cogcoor.pth", "groundingdino_swint_ogc.pth"]:
+            if alt_name == checkpoint_name:
+                continue
+            alt_path = weights_dir / alt_name
+            if alt_path.exists():
+                logger.info(f"대체 체크포인트 사용: {alt_path}")
+                return str(alt_path)
+        
+        raise FileNotFoundError(
+            f"체크포인트 파일을 찾을 수 없습니다.\n"
+            f"다음 위치에서 확인하세요: {weights_dir}/{checkpoint_name}"
+        )
     
     def _load_model(self):
         """모델 로드"""
         logger.info(f"Grounding DINO 모델 로드 중: {self.model_name} (device: {self.device})")
         try:
+            config_path = self._get_config_path()
+            checkpoint_path = self._get_checkpoint_path()
+            
+            logger.info(f"Config 경로: {config_path}")
+            logger.info(f"Checkpoint 경로: {checkpoint_path}")
+            
             self.model = load_model(
-                model_config_path=None,  # 자동으로 설정 파일 찾음
-                model_checkpoint_path=None,  # 자동으로 체크포인트 찾음
+                model_config_path=config_path,
+                model_checkpoint_path=checkpoint_path,
                 device=self.device,
             )
             self.model.eval()

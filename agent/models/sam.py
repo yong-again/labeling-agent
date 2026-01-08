@@ -41,7 +41,7 @@ class SAM:
     ):
         """
         Args:
-            model_type: 모델 타입 ('sam_vit_h', 'sam_vit_l', 'sam_vit_b')
+            model_type: 모델 타입 ('default', 'vit_h', 'vit_l', 'vit_b' 또는 'sam_vit_h', 'sam_vit_l', 'sam_vit_b')
             checkpoint_path: 체크포인트 파일 경로. None이면 자동 다운로드
             device: 디바이스 ('cuda' or 'cpu'). None이면 자동 선택
         """
@@ -60,9 +60,35 @@ class SAM:
         self.predictor = None
         self._load_model()
     
+    def _normalize_model_type(self) -> str:
+        """
+        model_type을 sam_model_registry에서 사용하는 형식으로 변환
+        
+        Returns:
+            'vit_h', 'vit_l', 'vit_b' 또는 'default'
+        """
+        model_type_lower = self.model_type.lower()
+        
+        # sam_vit_h, sam_vit_l, sam_vit_b 형식을 vit_h, vit_l, vit_b로 변환
+        if model_type_lower.startswith("sam_vit_"):
+            return model_type_lower.replace("sam_vit_", "vit_")
+        # 이미 vit_h, vit_l, vit_b 형식이면 그대로 사용
+        elif model_type_lower in ["vit_h", "vit_l", "vit_b"]:
+            return model_type_lower
+        # default는 그대로 사용
+        elif model_type_lower == "default":
+            return "default"
+        # 기본값: vit_h
+        else:
+            logger.warning(f"알 수 없는 모델 타입: {self.model_type}, 'vit_h' 사용")
+            return "vit_h"
+    
     def _load_model(self):
         """모델 로드"""
-        logger.info(f"SAM 모델 로드 중: {self.model_type} (device: {self.device})")
+        # model_type을 sam_model_registry 형식으로 변환
+        registry_model_type = self._normalize_model_type()
+        
+        logger.info(f"SAM 모델 로드 중: {self.model_type} -> {registry_model_type} (device: {self.device})")
         
         try:
             # 체크포인트 경로 확인
@@ -84,8 +110,8 @@ class SAM:
                 else:
                     raise ValueError(f"알 수 없는 모델 타입: {self.model_type}")
             
-            # 모델 로드
-            sam = sam_model_registry[self.model_type](checkpoint=self.checkpoint_path)
+            # 모델 로드: sam_model_registry에서 변환된 model_type 사용
+            sam = sam_model_registry[registry_model_type](checkpoint=self.checkpoint_path)
             sam.to(device=self.device)
             self.predictor = SamPredictor(sam)
             logger.info("모델 로드 완료")
@@ -105,7 +131,7 @@ class SAM:
             image: PIL Image
             boxes: (N, 4) numpy array [x1, y1, x2, y2] (정규화 좌표 0-1)
         
-        Returns:
+        Returns:    
             masks: List of (H, W) binary numpy arrays
         """
         if self.predictor is None:
