@@ -17,17 +17,16 @@ Grounding DINO + SAM 기반 자동 라벨링 파이프라인 with Human-In-The-L
 ```mermaid
 graph TD
     A[이미지 업로드] --> B[Web UI]
-    B --> C[LabelingPipeline]
-    C --> D[Grounding DINO]
-    D --> E[Bounding Boxes]
-    E --> F[SAM]
-    F --> G[Segmentation Masks]
-    G --> H[HITL Review]
-    H -->|Approved| I[Export]
-    H -->|Rejected/Corrected| J[Feedback DB]
+    B --> C[Grounding DINO]
+    C --> D[Bounding Boxes]
+    D --> E[SAM]
+    E --> F[Segmentation Masks]
+    F --> G[HITL Review]
+    G -->|Approved| H[Export]
+    G -->|Rejected/Corrected| J[Feedback DB]
     J --> K[Continuous Learning]
-    I --> L[COCO Format]
-    I --> M[YOLO Format]
+    H --> L[COCO Format]
+    H --> M[YOLO Format]
     
     style D fill:#e1f5ff
     style F fill:#e1f5ff

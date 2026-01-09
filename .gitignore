@@ -61,5 +61,4 @@ images/
 uploads/
 
 # temp files
-
-temp.py
+/temp.py

@@ -16,6 +16,7 @@ from agent.models.sam import SAM
 from agent.converters.coco_format import COCOConverter
 from agent.converters.yolo_format import YOLOConverter
 from agent.utils.visualize import draw_bounding_boxes, draw_segmentation_masks, draw_dino_and_sam, save_visualization
+from agent.utils.image_loader import load_image
 
 logger = logging.getLogger(__name__)
 
@@ -106,14 +107,15 @@ class LabelingPipeline:
         # 이미지 경로 문자열로 변환
         image_path = str(image_path)
         
-        # 이미지 크기 확인
-        pil_image = Image.open(image_path).convert("RGB")
+        # 이미지 로드
+        image_source, image_transformed, pil_image = load_image(image_path)
         image_width, image_height = pil_image.size
         
         # DINO: Bounding box 검출
         logger.info(f"DINO 검출 실행: prompt='{text_prompt}', threshold={confidence_threshold}")
         boxes, scores, labels = self.dino.predict(
-            image_path=image_path,
+            image_source=image_source,
+            image_transformed=image_transformed,
             text_prompt=text_prompt,
             box_threshold=confidence_threshold,
         )
@@ -133,7 +135,7 @@ class LabelingPipeline:
         
         # SAM: Box -> Mask 변환
         logger.info(f"SAM 마스크 생성: {len(boxes)}개 박스")
-        masks = self.sam.predict_from_boxes(pil_image, boxes)
+        masks = self.sam.predict_from_boxes(image_source, boxes)
         
         logger.info(f"라벨링 완료: {len(boxes)}개 객체 검출")
         
@@ -269,7 +271,7 @@ class LabelingPipeline:
             labels=result.labels,
             masks=result.masks,
             scores=result.scores,
-            normalized=False,  # DINO는 이제 픽셀 좌표를 반환
+            normalized=False,
         )
         
         # 저장

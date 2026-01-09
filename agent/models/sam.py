@@ -77,15 +77,15 @@ class SAM:
     
     def predict_from_boxes(
         self,
-        image: Image.Image,
+        image_source: np.ndarray,
         boxes: np.ndarray,
     ) -> List[np.ndarray]:
         """
         Bounding box로부터 마스크 생성
         
         Args:
-            image: PIL Image
-            boxes: (N, 4) numpy array [x1, y1, x2, y2]
+            image_source: numpy array (H, W, 3) - BGR 형식 (ImageLoader에서 로드)
+            boxes: (N, 4) numpy array [x1, y1, x2, y2] (픽셀 좌표)
         
         Returns:    
             masks: List of (H, W) binary numpy arrays
@@ -96,12 +96,9 @@ class SAM:
         if len(boxes) == 0:
             return []
         
-        # 이미지를 numpy array로 변환
-        image_np = np.array(image)
-        if len(image_np.shape) == 2:  # Grayscale
-            image_np = np.stack([image_np] * 3, axis=-1)
-        elif image_np.shape[2] == 4:  # RGBA
-            image_np = image_np[:, :, :3]
+        # BGR to RGB 변환 (image_source는 BGR 형식)
+        import cv2
+        image_np = cv2.cvtColor(image_source, cv2.COLOR_BGR2RGB)
         
         # SAM에 이미지 설정
         self.predictor.set_image(image_np)
@@ -165,12 +162,18 @@ class SAM:
     
     def predict_from_boxes_batch(
         self,
-        images: List[Image.Image],
+        image_sources: List[np.ndarray],
         boxes_list: List[np.ndarray],
     ) -> List[List[np.ndarray]]:
-        """배치 예측 (현재는 순차 처리)"""
+        """
+        배치 예측 (현재는 순차 처리)
+        
+        Args:
+            image_sources: 로드된 이미지 리스트 [numpy array (H, W, 3), ...]
+            boxes_list: 박스 리스트 [(N, 4) numpy array, ...]
+        """
         results = []
-        for image, boxes in zip(images, boxes_list):
-            masks = self.predict_from_boxes(image, boxes)
+        for image_source, boxes in zip(image_sources, boxes_list):
+            masks = self.predict_from_boxes(image_source, boxes)
             results.append(masks)
         return results

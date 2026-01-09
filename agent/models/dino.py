@@ -157,7 +157,8 @@ class GroundingDINO:
     
     def predict(
         self,
-        image_path: str,
+        image_source: np.ndarray,
+        image_transformed: torch.Tensor,
         text_prompt: str,
         box_threshold: float = 0.35,
         text_threshold: float = 0.25,
@@ -166,13 +167,14 @@ class GroundingDINO:
         이미지에서 오브젝트 검출
         
         Args:
-            image_path: 이미지 파일 경로
+            image_source: numpy array (H, W, 3) - BGR 형식
+            image_transformed: torch.Tensor - DINO 모델 입력용 전처리된 이미지
             text_prompt: 텍스트 프롬프트 (예: "phone. screen. crack")
             box_threshold: 박스 confidence threshold
             text_threshold: 텍스트 매칭 threshold
         
         Returns:
-            boxes: (N, 4) numpy array [x1, y1, x2, y2] (정규화 좌표 0-1)
+            boxes: (N, 4) numpy array [x1, y1, x2, y2] (픽셀 좌표)
             scores: (N,) numpy array confidence scores
             labels: List[str] 클래스 레이블
         """
@@ -181,8 +183,8 @@ class GroundingDINO:
         
         logger.debug(f"검출 실행: prompt='{text_prompt}', threshold={box_threshold}")
         
-        # 이미지 전처리 (경로에서 PIL Image 로드)
-        image_source, image = load_image(image_path)
+        # 이미지는 이미 로드됨 - image_source와 image_transformed 직접 사용
+        image = image_transformed
         
         # 예측
         boxes, logits, phrases = predict(
@@ -228,16 +230,16 @@ class GroundingDINO:
         
         logger.info(f"{len(boxes_np)}개 박스 검출됨")
         
-        # 결과 시각화 저장
-        annotated_frame = annotate(
-            image_source=image_source,
-            boxes=boxes,
-            logits=logits,
-            phrases=phrases,
-        )
-        output_path = Path(image_path).stem + "_dino_result.jpg"
-        cv2.imwrite(output_path, annotated_frame)
-        logger.info(f"DINO 결과 저장: {output_path}")
+        # # 결과 시각화 저장(for debug)
+        # annotated_frame = annotate(
+        #     image_source=image_source,
+        #     boxes=boxes,
+        #     logits=logits,
+        #     phrases=phrases,
+        # )
+        # output_path = Path(image_path).stem + "_dino_result.jpg"
+        # cv2.imwrite(output_path, annotated_frame)
+        # logger.info(f"DINO 결과 저장: {output_path}")
         
         # 디버그: 검출 결과 상세 정보
         logger.debug(f"[DINO 상세] 검출된 객체:")
@@ -253,14 +255,22 @@ class GroundingDINO:
     
     def predict_batch(
         self,
-        images: List[str],
+        images: List[Tuple[np.ndarray, torch.Tensor]],
         text_prompt: str,
         box_threshold: float = 0.35,
         text_threshold: float = 0.25,
     ) -> List[Tuple[np.ndarray, np.ndarray, List[str]]]:
-        """배치 예측 (현재는 순차 처리)"""
+        """
+        배치 예측 (현재는 순차 처리)
+        
+        Args:
+            images: 로드된 이미지 리스트 [(image_source, image_transformed), ...]
+            text_prompt: 텍스트 프롬프트
+            box_threshold: 박스 confidence threshold
+            text_threshold: 텍스트 매칭 threshold
+        """
         results = []
-        for image in images:
-            result = self.predict(image, text_prompt, box_threshold, text_threshold)
+        for image_source, image_transformed in images:
+            result = self.predict(image_source, image_transformed, text_prompt, box_threshold, text_threshold)
             results.append(result)
         return results
