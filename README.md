@@ -1,30 +1,38 @@
-# Labeling Pipeline Agent
+# DINO-SAM Auto Labeling Agent
 
-Label Studio + Grounding DINO + SAM 기반 자동 프리라벨링 파이프라인
+Grounding DINO + SAM 기반 자동 라벨링 파이프라인 with Human-In-The-Loop (HITL)
 
 ## 개요
 
-이 프로젝트는 이미지에 대한 자동 프리라벨링(pre-labeling)을 수행하는 파이프라인입니다. Grounding DINO로 오브젝트를 검출하고, SAM으로 세그멘테이션 마스크를 생성한 후, Label Studio에 업로드합니다.
+이 프로젝트는 이미지에 대한 자동 라벨링을 수행하는 파이프라인입니다:
+- **Grounding DINO**: 텍스트 프롬프트 기반 오브젝트 검출 (Bounding Box)
+- **SAM (Segment Anything Model)**: 정밀한 세그멘테이션 마스크 생성
+- **Web UI**: 이미지 업로드 및 라벨링 결과 확인
+- **HITL (Human-In-The-Loop)**: 품질 검증 (Pass/Fail) 및 피드백
+- **Export**: COCO, YOLO 포맷 지원
+- **Continuous Learning**: 피드백 기반 모델 업데이트 지원
 
 ## 아키텍처
 
 ```mermaid
 graph TD
-    A[이미지 디렉터리] --> B[CLI 실행]
+    A[이미지 업로드] --> B[Web UI]
     B --> C[LabelingPipeline]
     C --> D[Grounding DINO]
     D --> E[Bounding Boxes]
     E --> F[SAM]
-    F --> G[Masks]
-    G --> H[Label Studio Converter]
-    H --> I[Label Studio Format]
-    I --> J[Label Studio API]
-    J --> K[Label Studio 서버]
+    F --> G[Segmentation Masks]
+    G --> H[HITL Review]
+    H -->|Approved| I[Export]
+    H -->|Rejected/Corrected| J[Feedback DB]
+    J --> K[Continuous Learning]
+    I --> L[COCO Format]
+    I --> M[YOLO Format]
     
     style D fill:#e1f5ff
     style F fill:#e1f5ff
     style H fill:#fff4e1
-    style J fill:#ffe1f5
+    style K fill:#ffe1f5
 ```
 
 ## 설치
@@ -32,8 +40,7 @@ graph TD
 ### 1. 필수 요구사항
 
 - Python 3.10 이상
-- CUDA 지원 GPU (선택사항, CPU도 가능하지만 느림)
-- Label Studio 서버 실행 중
+- CUDA 지원 GPU (권장, CPU도 가능하지만 느림)
 
 ### 2. 의존성 설치
 
@@ -53,9 +60,21 @@ pip install -e .
 pip install git+https://github.com/facebookresearch/segment-anything.git
 ```
 
-### 3. SAM 체크포인트 다운로드 (선택사항)
+### 3. 모델 체크포인트 다운로드
 
-SAM 모델은 자동으로 체크포인트를 다운로드하지만, 수동으로 다운로드할 수도 있습니다:
+#### Grounding DINO 체크포인트
+
+```bash
+mkdir -p weights
+
+# SwinB (권장, 고정밀도)
+wget https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha2/groundingdino_swinb_cogcoor.pth -O weights/groundingdino_swinb_cogcoor.pth
+
+# 또는 SwinT (경량)
+wget https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth -O weights/groundingdino_swint_ogc.pth
+```
+
+#### SAM 체크포인트 (선택사항 - 자동 다운로드 지원)
 
 ```bash
 # SAM ViT-H (기본, 가장 정확)
@@ -68,131 +87,64 @@ wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth -O ~/.
 wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth -O ~/.cache/sam/sam_vit_b.pth
 ```
 
-환경변수로 체크포인트 경로 지정:
-```bash
-export SAM_CHECKPOINT_PATH=~/.cache/sam/sam_vit_h.pth
-```
-
 ## 환경변수 설정
 
-### 방법 1: .env 파일 사용 (권장)
+### .env 파일 사용 (권장)
 
 프로젝트 루트에 `.env` 파일을 생성하고 다음 내용을 추가하세요:
 
 ```bash
 # .env 파일 예시
-LS_URL=http://localhost:8080
-LS_API_TOKEN=your_api_token_here
-LS_PROJECT_ID=1
-
-# 선택사항
 CONFIDENCE_THRESHOLD=0.35
-BATCH_SIZE=1
-OUTPUT_FORMAT=polygonlabels
+OUTPUT_FORMAT=coco
 DEVICE=cuda
 SAM_CHECKPOINT_PATH=/path/to/checkpoint.pth
 ```
 
 `.env.example` 파일을 참고하여 복사하세요:
 ```bash
-# .env.example 파일이 있다면
 cp .env.example .env
-
-# 또는 직접 생성
-cat > .env << EOF
-LS_URL=http://localhost:8080
-LS_API_TOKEN=your_api_token_here
-LS_PROJECT_ID=1
-EOF
-
-# .env 파일을 열어서 실제 값으로 수정
 ```
 
-**주의**: `.env` 파일은 Git에 커밋하지 마세요 (`.gitignore`에 포함됨)
+## 실행 방법
 
-### 방법 2: 시스템 환경변수 사용
+### 1. Web UI 실행 (권장)
 
 ```bash
-# 필수
-export LS_URL=http://localhost:8080              # Label Studio 서버 URL
-export LS_API_TOKEN=your_api_token_here          # Label Studio API 토큰
-export LS_PROJECT_ID=1                           # Label Studio 프로젝트 ID
+# FastAPI 서버 시작
+python -m agent.app
 
-# 선택사항
-export CONFIDENCE_THRESHOLD=0.35                 # DINO confidence threshold (기본: 0.35)
-export BATCH_SIZE=1                              # 배치 크기 (기본: 1)
-export OUTPUT_FORMAT=polygonlabels               # 출력 포맷: polygonlabels or rectanglelabels (기본: polygonlabels)
-export DEVICE=cuda                               # 디바이스: cuda or cpu (기본: 자동 선택)
-export SAM_CHECKPOINT_PATH=/path/to/checkpoint.pth  # SAM 체크포인트 경로
+# 또는 uvicorn 직접 실행
+uvicorn agent.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-**우선순위**: 시스템 환경변수 > .env 파일
+브라우저에서 `http://localhost:8000` 접속
 
-### Label Studio API 토큰 얻기
+#### Web UI 기능
 
-1. Label Studio에 로그인
-2. Settings → Account & Security → Access Token
-3. 토큰 생성 또는 기존 토큰 복사
+- **이미지 업로드**: 드래그 앤 드롭 또는 파일 선택
+- **프롬프트 입력**: 검출할 객체 (예: "phone, screen, crack")
+- **라벨링 실행**: 자동 객체 검출 및 세그멘테이션
+- **결과 확인**: Bounding Box 및 마스크 시각화
+- **HITL 피드백**: Pass/Fail 품질 검증
+- **라벨 내보내기**: COCO/YOLO 포맷
 
-## Label Studio 라벨 설정
-
-Label Studio 프로젝트를 생성할 때 다음 설정을 사용하세요:
-
-### polygonlabels 포맷 (기본, 권장)
-
-```xml
-<View>
-  <Image name="image" value="$image"/>
-  <PolygonLabels name="label" toName="image">
-    <Label value="phone" background="red"/>
-    <Label value="screen" background="blue"/>
-    <Label value="crack" background="orange"/>
-    <Label value="scratch" background="green"/>
-  </PolygonLabels>
-</View>
-```
-
-### rectanglelabels 포맷
-
-```xml
-<View>
-  <Image name="image" value="$image"/>
-  <RectangleLabels name="label" toName="image">
-    <Label value="phone" background="red"/>
-    <Label value="screen" background="blue"/>
-    <Label value="crack" background="orange"/>
-    <Label value="scratch" background="green"/>
-  </RectangleLabels>
-</View>
-```
-
-**중요**: 
-- `name="label"`은 코드의 `from_name`과 일치해야 합니다
-- `toName="image"`는 코드의 `to_name`과 일치해야 합니다
-- 클래스 이름은 프롬프트와 일치해야 합니다 (대소문자 구분)
-
-## 실행
-
-### 기본 실행
+### 2. CLI 실행
 
 ```bash
+# 기본 실행
 python -m agent.run \
   --input /path/to/images \
-  --prompt "phone, screen, crack, scratch" \
-  --project-id 1 \
+  --prompt "phone, screen, crack" \
   --threshold 0.35
-```
 
-### 고급 옵션
-
-```bash
+# 고급 옵션
 python -m agent.run \
   --input /path/to/images \
-  --prompt "phone, screen" \
-  --project-id 1 \
+  --prompt "phone, screen, crack" \
   --threshold 0.35 \
-  --batch-size 4 \
-  --output-format polygonlabels \
+  --output-format coco \
+  --output-dir ./output \
   --device cuda \
   --verbose
 ```
@@ -203,225 +155,276 @@ python -m agent.run \
 |------|------|------|--------|
 | `--input` | ✅ | 이미지 디렉터리 경로 | - |
 | `--prompt` | ✅ | 텍스트 프롬프트 (쉼표로 구분) | - |
-| `--project-id` | ❌ | Label Studio 프로젝트 ID | 환경변수 `LS_PROJECT_ID` |
 | `--threshold` | ❌ | Confidence threshold | 0.35 |
-| `--batch-size` | ❌ | 배치 크기 | 1 |
-| `--output-format` | ❌ | 출력 포맷 (`polygonlabels` or `rectanglelabels`) | `polygonlabels` |
+| `--output-format` | ❌ | 출력 포맷 (`coco` or `yolo`) | `coco` |
+| `--output-dir` | ❌ | 출력 디렉터리 | `./output` |
 | `--device` | ❌ | 디바이스 (`cuda` or `cpu`) | 자동 선택 |
 | `--verbose` | ❌ | 상세 로그 출력 | False |
+
+## API 엔드포인트
+
+### 이미지 업로드
+```bash
+POST /upload
+Content-Type: multipart/form-data
+
+# Response
+{
+  "image_id": "uuid-string",
+  "filename": "image.jpg",
+  "path": "/uploads/uuid-string.jpg"
+}
+```
+
+### 라벨링 실행
+```bash
+POST /label
+Content-Type: application/json
+
+{
+  "image_id": "uuid-string",
+  "prompt": "phone, screen, crack",
+  "confidence_threshold": 0.35
+}
+
+# Response
+{
+  "image_id": "uuid-string",
+  "num_objects": 3,
+  "boxes": [[x1, y1, x2, y2], ...],
+  "labels": ["phone", "screen", "crack"],
+  "scores": [0.95, 0.87, 0.72]
+}
+```
+
+### HITL 피드백 제출
+```bash
+POST /feedback
+Content-Type: application/json
+
+{
+  "image_id": "uuid-string",
+  "status": "approved",  // approved, rejected, corrected
+  "corrections": {...},  // 수정된 라벨 (optional)
+  "notes": "추가 메모"   // optional
+}
+```
+
+### 라벨 내보내기
+```bash
+POST /export
+Content-Type: application/json
+
+{
+  "image_ids": ["uuid-1", "uuid-2"],
+  "format": "coco"  // coco or yolo
+}
+```
+
+### 통계 조회
+```bash
+GET /stats
+
+# Response
+{
+  "total": 100,
+  "pending": 20,
+  "approved": 70,
+  "rejected": 5,
+  "corrected": 5
+}
+```
 
 ## 프로젝트 구조
 
 ```
-pipeline/
+labeling-agent/
 ├── agent/
 │   ├── __init__.py
+│   ├── app.py                 # FastAPI 웹 서버
 │   ├── config.py              # 설정 관리
-│   ├── ls_client.py            # Label Studio API 클라이언트
-│   ├── pipeline.py             # 파이프라인 오케스트레이션
-│   ├── run.py                  # CLI 진입점
+│   ├── pipeline.py            # DINO-SAM 파이프라인
+│   ├── feedback.py            # HITL 피드백 관리
+│   ├── run.py                 # CLI 진입점
 │   ├── models/
 │   │   ├── __init__.py
-│   │   ├── dino.py             # Grounding DINO 래퍼
-│   │   └── sam.py              # SAM 래퍼
-│   └── converters/
-│       ├── __init__.py
-│       └── ls_format.py        # Label Studio 포맷 변환기
+│   │   ├── dino.py            # Grounding DINO 래퍼
+│   │   └── sam.py             # SAM 래퍼
+│   ├── converters/
+│   │   ├── __init__.py
+│   │   ├── coco_format.py     # COCO 포맷 변환기
+│   │   └── yolo_format.py     # YOLO 포맷 변환기
+│   ├── training/
+│   │   ├── __init__.py
+│   │   ├── data_collector.py  # 학습 데이터 수집
+│   │   └── trainer.py         # Continuous Learning
+│   ├── static/                # 정적 파일 (CSS, JS)
+│   └── templates/             # HTML 템플릿
+├── weights/                   # 모델 체크포인트
+├── uploads/                   # 업로드된 이미지
+├── output/                    # 라벨 출력
 ├── requirements.txt
 ├── pyproject.toml
 └── README.md
 ```
 
-## 실행 체크리스트
+## 모델 사용법
 
-### 사전 준비
+### Grounding DINO
 
-- [ ] Python 3.10+ 설치 확인
-- [ ] Label Studio 서버 실행 중 확인
-- [ ] Label Studio 프로젝트 생성 및 ID 확인
-- [ ] Label Studio API 토큰 생성
-- [ ] `.env` 파일 생성 및 설정 (또는 환경변수 설정)
-  - `.env.example`을 복사하여 `.env` 생성
-  - `LS_URL`, `LS_API_TOKEN`, `LS_PROJECT_ID` 설정
-- [ ] 의존성 설치 완료 (requirements.txt)
-- [ ] Grounding DINO 설치 완료
-- [ ] SAM 설치 완료
-- [ ] SAM 체크포인트 다운로드 (자동 또는 수동)
-- [ ] Label Studio 라벨 설정 확인 (코드와 일치)
+```python
+from agent.models.dino import GroundingDINO
 
-### 실행 전 확인
+# 모델 초기화
+dino = GroundingDINO(
+    model_name="groundingdino/groundingdino_swinb_cogcoor",
+    device="cuda"
+)
 
-- [ ] 이미지 디렉터리 경로 확인
-- [ ] 이미지 파일 형식 확인 (jpg, png, bmp, tiff 등)
-- [ ] 프롬프트 클래스 이름이 Label Studio 설정과 일치하는지 확인
-- [ ] GPU 사용 시 CUDA 설치 확인 (`nvidia-smi`)
+# 예측 (이미지 경로로 입력)
+boxes, scores, labels = dino.predict(
+    image_path="/path/to/image.jpg",
+    text_prompt="phone. screen. crack",
+    box_threshold=0.35,
+    text_threshold=0.25
+)
 
-### 실행
-
-```bash
-# 테스트 실행 (작은 이미지 세트)
-python -m agent.run \
-  --input ./test_images \
-  --prompt "phone, screen" \
-  --project-id 1 \
-  --threshold 0.35 \
-  --verbose
-
-# 프로덕션 실행
-python -m agent.run \
-  --input /data/images \
-  --prompt "phone, screen, crack, scratch" \
-  --project-id 1 \
-  --threshold 0.35 \
-  --batch-size 4 \
-  --output-format polygonlabels
+# boxes: (N, 4) [x1, y1, x2, y2] 정규화 좌표 (0-1)
+# scores: (N,) confidence scores
+# labels: List[str] 검출된 클래스
 ```
 
-### 실행 후 확인
+### SAM
 
-- [ ] Label Studio에서 태스크가 생성되었는지 확인
-- [ ] 예측(pre-label)이 업로드되었는지 확인
-- [ ] 라벨이 올바르게 표시되는지 확인
-- [ ] 좌표가 정확한지 확인 (이미지 크기와 일치)
-- [ ] 클래스 이름이 올바른지 확인
+```python
+from agent.models.sam import SAM
+from PIL import Image
+
+# 모델 초기화
+sam = SAM(model_name="sam_vit_h", device="cuda")
+
+# 이미지 로드
+image = Image.open("/path/to/image.jpg")
+
+# Bounding Box로 마스크 생성
+masks = sam.predict(
+    image=image,
+    boxes=boxes,           # (N, 4) [x1, y1, x2, y2] 픽셀 좌표
+    multimask_output=False
+)
+
+# masks: List[np.ndarray] 각 박스에 대한 binary 마스크
+```
+
+### 파이프라인 (DINO + SAM)
+
+```python
+from agent.config import Config
+from agent.pipeline import LabelingPipeline
+
+# 설정 및 파이프라인 초기화
+config = Config()
+pipeline = LabelingPipeline(config)
+
+# 단일 이미지 처리
+result = pipeline.process_image(
+    image="/path/to/image.jpg",
+    text_prompt="phone, screen, crack",
+    confidence_threshold=0.35
+)
+
+# 결과 확인
+print(f"검출된 객체 수: {result.num_objects}")
+print(f"박스: {result.boxes}")
+print(f"라벨: {result.labels}")
+print(f"마스크 있음: {result.has_masks}")
+
+# COCO 포맷으로 내보내기
+pipeline.export_coco(result, "/path/to/output.json")
+
+# YOLO 포맷으로 내보내기
+pipeline.export_yolo(result, "/path/to/output.txt")
+```
+
+## 출력 포맷
+
+### COCO Format
+
+```json
+{
+  "images": [
+    {"id": 1, "file_name": "image.jpg", "width": 1920, "height": 1080}
+  ],
+  "annotations": [
+    {
+      "id": 1,
+      "image_id": 1,
+      "category_id": 1,
+      "bbox": [100, 200, 300, 400],
+      "segmentation": [[x1, y1, x2, y2, ...]],
+      "area": 120000,
+      "iscrowd": 0
+    }
+  ],
+  "categories": [
+    {"id": 1, "name": "phone"}
+  ]
+}
+```
+
+### YOLO Format
+
+```
+# labels/image.txt
+# class_id center_x center_y width height
+0 0.5 0.5 0.3 0.4
+1 0.3 0.7 0.2 0.3
+```
 
 ## 트러블슈팅
 
-### 1. Label Studio 포맷 오류
-
-**증상**: Label Studio에서 라벨이 표시되지 않음
-
-**원인 및 해결**:
-- **라벨 설정 불일치**: Label Studio 설정의 `name`과 `toName`이 코드와 일치하는지 확인
-  - 코드: `from_name="label"`, `to_name="image"`
-  - Label Studio: `name="label"`, `toName="image"`
-- **클래스 이름 불일치**: 프롬프트의 클래스 이름이 Label Studio 설정과 정확히 일치해야 함
-  - 예: 프롬프트 `"phone, screen"` → Label Studio에 `phone`, `screen` 레이블 필요
-- **출력 포맷 불일치**: `--output-format`과 Label Studio 설정이 일치해야 함
-  - `polygonlabels` → `<PolygonLabels>`
-  - `rectanglelabels` → `<RectangleLabels>`
-
-### 2. 좌표계 문제
-
-**증상**: 라벨이 이미지 밖에 표시되거나 크기가 이상함
-
-**원인 및 해결**:
-- **좌표 형식**: Label Studio는 퍼센트 좌표(0-100)를 사용
-- **이미지 크기**: 이미지 로드 시 실제 크기를 사용해야 함
-- **정규화 좌표**: DINO는 정규화 좌표(0-1)를 반환하므로 픽셀 좌표로 변환 필요
-
-**확인 방법**:
-```python
-# 디버깅: 이미지 크기 확인
-from PIL import Image
-img = Image.open("test.jpg")
-print(f"이미지 크기: {img.size}")  # (width, height)
-```
-
-### 3. 마스크 변환 오류
-
-**증상**: `polygonlabels` 포맷에서 마스크가 제대로 변환되지 않음
-
-**원인 및 해결**:
-- **컨투어 찾기 실패**: OpenCV가 제대로 설치되었는지 확인
-  ```bash
-  pip install opencv-python
-  ```
-- **최소 영역 필터**: 너무 작은 마스크는 제외됨 (기본: 100 픽셀)
-  - `converters/ls_format.py`의 `min_area` 파라미터 조정
-- **마스크 형식**: 마스크는 binary (0 또는 1)여야 함
-- **이미지 채널**: Grayscale 이미지는 RGB로 변환됨
-
-**해결책**:
-```python
-# polygonlabels 대신 rectanglelabels 사용
-python -m agent.run --output-format rectanglelabels ...
-```
-
-### 4. 모델 로드 오류
+### 1. 모델 로드 오류
 
 **증상**: `ImportError` 또는 모델 로드 실패
 
-**원인 및 해결**:
-- **Grounding DINO 미설치**:
-  ```bash
-  pip install groundingdino-py
-  ```
-- **SAM 미설치**:
-  ```bash
-  pip install git+https://github.com/facebookresearch/segment-anything.git
-  ```
-- **체크포인트 경로 오류**: SAM 체크포인트가 올바른 경로에 있는지 확인
-  ```bash
-  ls ~/.cache/sam/sam_vit_h.pth
-  ```
+**해결**:
+```bash
+# Grounding DINO 설치 확인
+pip install groundingdino-py
 
-### 5. GPU 메모리 부족
+# SAM 설치 확인
+pip install git+https://github.com/facebookresearch/segment-anything.git
+
+# 체크포인트 확인
+ls weights/groundingdino_swinb_cogcoor.pth
+```
+
+### 2. GPU 메모리 부족
 
 **증상**: CUDA out of memory 오류
 
-**해결책**:
-- **작은 모델 사용**: `sam_vit_b` 또는 `sam_vit_l` 사용
-  ```bash
-  export SAM_MODEL_NAME=sam_vit_b
-  ```
-- **배치 크기 감소**: `--batch-size 1`
-- **CPU 사용**: `--device cpu` (느리지만 메모리 문제 없음)
+**해결**:
+- 작은 SAM 모델 사용: `sam_vit_b` 또는 `sam_vit_l`
+- CPU 사용: `--device cpu`
+- 이미지 크기 축소
 
-### 6. Label Studio 연결 오류
+### 3. 검출 결과 없음
 
-**증상**: API 요청 실패 (Connection refused, 401 Unauthorized 등)
+**증상**: 이미지 처리 후 검출된 박스가 없음
 
-**원인 및 해결**:
-- **서버 미실행**: Label Studio 서버가 실행 중인지 확인
-  ```bash
-  label-studio start
-  ```
-- **URL 오류**: `LS_URL`이 올바른지 확인 (끝에 `/` 제거)
-  ```bash
-  export LS_URL=http://localhost:8080  # ✅ 올바름
-  export LS_URL=http://localhost:8080/  # ❌ 잘못됨
-  ```
-- **토큰 오류**: API 토큰이 올바른지 확인
-  - Label Studio → Settings → Access Token
-- **프로젝트 ID 오류**: 프로젝트 ID가 존재하는지 확인
-  ```bash
-  # 프로젝트 목록 확인 (API 또는 웹 UI)
-  curl -H "Authorization: Token $LS_API_TOKEN" $LS_URL/api/projects
-  ```
+**해결**:
+- `--threshold` 값을 낮춤 (예: 0.25)
+- 프롬프트 형식 확인: `"phone. screen. crack"` (마침표 구분)
+- 이미지 품질 확인
 
-### 7. 검출 결과 없음
+### 4. 마스크 생성 실패
 
-**증상**: 이미지를 처리했지만 검출된 박스가 없음
+**증상**: SAM 마스크가 비어있거나 잘못됨
 
-**원인 및 해결**:
-- **Threshold 너무 높음**: `--threshold` 값을 낮춤 (예: 0.25)
-- **프롬프트 불일치**: 이미지에 실제로 존재하는 객체를 프롬프트에 포함
-- **이미지 품질**: 이미지가 너무 작거나 흐릿하면 검출 어려움
-
-**디버깅**:
-```bash
-# 상세 로그로 실행
-python -m agent.run --verbose ...
-```
-
-### 8. 로컬 파일 경로 문제
-
-**증상**: Label Studio에서 이미지를 불러올 수 없음
-
-**원인**: Label Studio는 로컬 파일 경로를 직접 접근할 수 없음
-
-**해결책**:
-1. **파일 서버 사용**: 이미지를 HTTP URL로 제공
-   ```python
-   # 예: http://localhost:8000/images/image1.jpg
-   ```
-2. **Label Studio 파일 업로드**: Label Studio에 직접 이미지 업로드
-3. **공유 스토리지**: Label Studio 서버가 접근 가능한 공유 디렉터리 사용
-
-**임시 해결책** (개발/테스트용):
-- Label Studio를 로컬에서 실행하고 이미지 디렉터리를 마운트
-- 또는 이미지를 Label Studio에 직접 업로드 후 태스크 생성
+**해결**:
+- OpenCV 설치 확인: `pip install opencv-python`
+- Bounding Box 좌표 확인 (픽셀 좌표인지)
+- 이미지 크기와 박스 좌표 일치 확인
 
 ## 성능 최적화
 
@@ -431,54 +434,17 @@ python -m agent.run --verbose ...
 # CUDA 확인
 nvidia-smi
 
-# GPU 사용 (자동 선택)
-python -m agent.run --device cuda ...
-```
-
-### 배치 처리
-
-```bash
-# 배치 크기 증가 (GPU 메모리에 따라 조정)
-python -m agent.run --batch-size 4 ...
+# GPU 사용
+python -m agent.app  # 자동으로 CUDA 사용
 ```
 
 ### 모델 선택
 
-- **SAM ViT-H**: 가장 정확하지만 느리고 메모리 많이 사용
-- **SAM ViT-L**: 균형잡힌 선택
-- **SAM ViT-B**: 빠르고 메모리 적게 사용하지만 정확도 낮음
-
-```bash
-# 환경변수로 모델 선택
-export SAM_MODEL_NAME=sam_vit_b
-```
-
-## 예제
-
-### 예제 1: 스마트폰 결함 검출
-
-```bash
-export LS_URL=http://localhost:8080
-export LS_API_TOKEN=your_token
-export LS_PROJECT_ID=1
-
-python -m agent.run \
-  --input ./phone_images \
-  --prompt "phone, screen, crack, scratch, dent" \
-  --threshold 0.35 \
-  --output-format polygonlabels
-```
-
-### 예제 2: 빠른 처리 (rectanglelabels)
-
-```bash
-python -m agent.run \
-  --input ./images \
-  --prompt "object" \
-  --threshold 0.3 \
-  --output-format rectanglelabels \
-  --batch-size 8
-```
+| 모델 | 정확도 | 속도 | 메모리 |
+|------|--------|------|--------|
+| SAM ViT-H | ⭐⭐⭐ | ⭐ | ⭐ |
+| SAM ViT-L | ⭐⭐ | ⭐⭐ | ⭐⭐ |
+| SAM ViT-B | ⭐ | ⭐⭐⭐ | ⭐⭐⭐ |
 
 ## 라이선스
 
@@ -486,7 +452,5 @@ MIT License
 
 ## 참고 자료
 
-- [Label Studio Documentation](https://labelstud.io/guide/)
 - [Grounding DINO](https://github.com/IDEA-Research/GroundingDINO)
 - [Segment Anything Model (SAM)](https://github.com/facebookresearch/segment-anything)
-

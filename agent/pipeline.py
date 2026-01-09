@@ -1,25 +1,61 @@
 """
 파이프라인 오케스트레이션
-DINO -> SAM -> Label Studio 변환 및 업로드
+DINO -> SAM -> Export (Label Studio 제거됨)
 """
 
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Union
 from pathlib import Path
 import numpy as np
 from PIL import Image
 
 from agent.config import Config
-from agent.ls_client import LabelStudioClient
 from agent.models.dino import GroundingDINO
 from agent.models.sam import SAM
-from agent.converters.ls_format import LabelStudioConverter
+from agent.converters.coco_format import COCOConverter
+from agent.converters.yolo_format import YOLOConverter
+from agent.utils.visualize import draw_bounding_boxes, draw_segmentation_masks, draw_dino_and_sam, save_visualization
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class LabelingResult:
+    """라벨링 결과 데이터 클래스"""
+    image_path: str
+    image_width: int
+    image_height: int
+    boxes: np.ndarray  # (N, 4) [x1, y1, x2, y2] (픽셀 좌표)
+    scores: np.ndarray  # (N,)
+    labels: List[str]
+    masks: List[np.ndarray]  # List of (H, W)
+    prompt: str
+    
+    @property
+    def num_objects(self) -> int:
+        return len(self.boxes)
+    
+    @property
+    def has_masks(self) -> bool:
+        return len(self.masks) > 0
+    
+    def to_dict(self) -> dict:
+        """JSON 직렬화 가능한 딕셔너리로 변환"""
+        return {
+            "image_path": self.image_path,
+            "image_width": self.image_width,
+            "image_height": self.image_height,
+            "num_objects": self.num_objects,
+            "labels": self.labels,
+            "scores": self.scores.tolist() if len(self.scores) > 0 else [],
+            "boxes": self.boxes.tolist() if len(self.boxes) > 0 else [],
+            "prompt": self.prompt,
+        }
+
+
 class LabelingPipeline:
-    """라벨링 파이프라인"""
+    """DINO-SAM 라벨링 파이프라인"""
     
     def __init__(self, config: Config):
         """
@@ -28,8 +64,7 @@ class LabelingPipeline:
         """
         self.config = config
         
-        # 클라이언트 및 모델 초기화
-        self.ls_client = LabelStudioClient(config.ls_url, config.ls_api_token)
+        # 모델 초기화
         self.dino = GroundingDINO(
             model_name=config.dino_model_name,
             config_path=config.dino_config_path,
@@ -41,16 +76,19 @@ class LabelingPipeline:
             checkpoint_path=config.sam_checkpoint_path,
             device=config.device,
         )
-        self.converter = LabelStudioConverter(output_format=config.output_format)
+        
+        # Converters
+        self.coco_converter = COCOConverter(config.class_mapping.copy())
+        self.yolo_converter = YOLOConverter(config.class_mapping.copy())
         
         logger.info("파이프라인 초기화 완료")
     
     def process_image(
         self,
-        image_path: str,
+        image_path: Union[str, Path],
         text_prompt: str,
         confidence_threshold: Optional[float] = None,
-    ) -> Tuple[np.ndarray, np.ndarray, List[str], List[np.ndarray]]:
+    ) -> LabelingResult:
         """
         단일 이미지 처리
         
@@ -60,103 +98,279 @@ class LabelingPipeline:
             confidence_threshold: Confidence threshold (None이면 config 사용)
         
         Returns:
-            boxes, scores, labels, masks
+            LabelingResult 객체
         """
         if confidence_threshold is None:
             confidence_threshold = self.config.confidence_threshold
         
-        # 이미지 로드
-        logger.info(f"이미지 로드: {image_path}")
-        image = Image.open(image_path).convert("RGB")
-        image_width, image_height = image.size
+        # 이미지 경로 문자열로 변환
+        image_path = str(image_path)
+        
+        # 이미지 크기 확인
+        pil_image = Image.open(image_path).convert("RGB")
+        image_width, image_height = pil_image.size
         
         # DINO: Bounding box 검출
-        logger.info(f"DINO 검출 실행: prompt='{text_prompt}'")
+        logger.info(f"DINO 검출 실행: prompt='{text_prompt}', threshold={confidence_threshold}")
         boxes, scores, labels = self.dino.predict(
-            image=image,
+            image_path=image_path,
             text_prompt=text_prompt,
             box_threshold=confidence_threshold,
         )
         
         if len(boxes) == 0:
             logger.warning("검출된 박스가 없습니다")
-            return boxes, scores, labels, []
+            return LabelingResult(
+                image_path=image_path,
+                image_width=image_width,
+                image_height=image_height,
+                boxes=boxes,
+                scores=scores,
+                labels=labels,
+                masks=[],
+                prompt=text_prompt,
+            )
         
         # SAM: Box -> Mask 변환
         logger.info(f"SAM 마스크 생성: {len(boxes)}개 박스")
-        masks = self.sam.predict_from_boxes(image, boxes)
+        masks = self.sam.predict_from_boxes(pil_image, boxes)
         
-        return boxes, scores, labels, masks
-    
-    def process_image_to_ls_format(
-        self,
-        image_path: str,
-        text_prompt: str,
-        confidence_threshold: Optional[float] = None,
-    ) -> List[Dict[str, Any]]:
-        """
-        이미지를 처리하여 Label Studio 포맷으로 변환
+        logger.info(f"라벨링 완료: {len(boxes)}개 객체 검출")
         
-        Args:
-            image_path: 이미지 파일 경로
-            text_prompt: 텍스트 프롬프트
-            confidence_threshold: Confidence threshold
-        
-        Returns:
-            Label Studio prediction 포맷 리스트
-        """
-        # 이미지 로드 (크기 확인용)
-        image = Image.open(image_path).convert("RGB")
-        image_width, image_height = image.size
-        
-        # 파이프라인 실행
-        boxes, scores, labels, masks = self.process_image(
-            image_path, text_prompt, confidence_threshold
-        )
-        
-        if len(boxes) == 0:
-            return []
-        
-        # Label Studio 포맷으로 변환
-        results = self.converter.convert(
+        return LabelingResult(
+            image_path=image_path,
+            image_width=image_width,
+            image_height=image_height,
             boxes=boxes,
             scores=scores,
             labels=labels,
-            masks=masks if self.config.output_format == "polygonlabels" else None,
-            image_width=image_width,
-            image_height=image_height,
+            masks=masks,
+            prompt=text_prompt,
+        )
+    
+    def export_coco(
+        self,
+        result: LabelingResult,
+        output_path: str,
+        image_id: int = 1,
+        use_rle: bool = False,
+    ) -> dict:
+        """
+        COCO 포맷으로 내보내기
+        
+        Args:
+            result: LabelingResult 객체
+            output_path: 출력 파일 경로
+            image_id: 이미지 ID
+            use_rle: RLE 사용 여부 (False면 polygon)
+            
+        Returns:
+            COCO format 딕셔너리
+        """
+        coco_data = self.coco_converter.convert(
+            boxes=result.boxes,
+            scores=result.scores,
+            labels=result.labels,
+            masks=result.masks if result.has_masks else None,
+            image_id=image_id,
+            image_width=result.image_width,
+            image_height=result.image_height,
+            image_filename=Path(result.image_path).name,
+            use_rle=use_rle,
         )
         
-        return results
+        self.coco_converter.save(coco_data, output_path)
+        return coco_data
+    
+    def export_yolo(
+        self,
+        result: LabelingResult,
+        output_path: str,
+        save_classes: bool = True,
+    ) -> str:
+        """
+        YOLO 포맷으로 내보내기
+        
+        Args:
+            result: LabelingResult 객체
+            output_path: 출력 파일 경로
+            save_classes: classes.txt 저장 여부
+            
+        Returns:
+            YOLO format 문자열
+        """
+        yolo_data = self.yolo_converter.convert(
+            boxes=result.boxes,
+            labels=result.labels,
+            masks=result.masks if result.has_masks else None,
+            image_width=result.image_width,
+            image_height=result.image_height,
+        )
+        
+        self.yolo_converter.save(yolo_data, output_path)
+        
+        # classes.txt 저장
+        if save_classes:
+            classes_path = Path(output_path).parent / "classes.txt"
+            self.yolo_converter.save_classes(str(classes_path))
+        
+        return yolo_data
+    
+    def export(
+        self,
+        result: LabelingResult,
+        output_path: str,
+        format: Optional[str] = None,
+    ) -> Union[dict, str]:
+        """
+        설정된 포맷으로 내보내기
+        
+        Args:
+            result: LabelingResult 객체
+            output_path: 출력 파일 경로
+            format: 출력 포맷 ("coco" or "yolo"). None이면 config 사용
+            
+        Returns:
+            내보내기 결과 (COCO: dict, YOLO: str)
+        """
+        if format is None:
+            format = self.config.output_format
+        
+        format = format.lower()
+        
+        if format == "coco":
+            return self.export_coco(result, output_path)
+        elif format == "yolo":
+            return self.export_yolo(result, output_path)
+        else:
+            raise ValueError(f"지원하지 않는 포맷: {format}. 지원 포맷: coco, yolo")
+    
+    def visualize(
+        self,
+        result: LabelingResult,
+        output_dir: Optional[str] = None,
+    ) -> Tuple[Image.Image, Image.Image, Image.Image]:
+        """
+        라벨링 결과 시각화
+        
+        Args:
+            result: LabelingResult 객체
+            output_dir: 시각화 이미지 저장 디렉터리 (None이면 저장 안함)
+            
+        Returns:
+            (dino_result, sam_result, combined_result) 튜플
+            - dino_result: DINO Bounding Box만 그린 이미지
+            - sam_result: SAM Segmentation Mask만 그린 이미지  
+            - combined_result: 둘 다 그린 이미지
+        """
+        dino_result, sam_result, combined_result = draw_dino_and_sam(
+            image=result.image_path,
+            boxes=result.boxes,
+            labels=result.labels,
+            masks=result.masks,
+            scores=result.scores,
+            normalized=False,  # DINO는 이제 픽셀 좌표를 반환
+        )
+        
+        # 저장
+        if output_dir:
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+            
+            image_stem = Path(result.image_path).stem
+            
+            save_visualization(dino_result, output_path / f"{image_stem}_dino_bbox.jpg")
+            save_visualization(sam_result, output_path / f"{image_stem}_sam_mask.jpg")
+            save_visualization(combined_result, output_path / f"{image_stem}_combined.jpg")
+            
+            logger.info(f"시각화 저장 완료: {output_path}")
+        
+        return dino_result, sam_result, combined_result
+    
+    def visualize_dino(
+        self,
+        result: LabelingResult,
+        output_path: Optional[str] = None,
+    ) -> Image.Image:
+        """
+        DINO Bounding Box만 시각화
+        
+        Args:
+            result: LabelingResult 객체
+            output_path: 저장 경로 (선택사항)
+            
+        Returns:
+            Bounding Box가 그려진 PIL Image
+        """
+        dino_result = draw_bounding_boxes(
+            image=result.image_path,
+            boxes=result.boxes,
+            labels=result.labels,
+            scores=result.scores,
+            normalized=False,  # DINO는 이제 픽셀 좌표를 반환
+        )
+        
+        if output_path:
+            save_visualization(dino_result, output_path)
+        
+        return dino_result
+    
+    def visualize_sam(
+        self,
+        result: LabelingResult,
+        output_path: Optional[str] = None,
+    ) -> Image.Image:
+        """
+        SAM Segmentation Mask만 시각화
+        
+        Args:
+            result: LabelingResult 객체
+            output_path: 저장 경로 (선택사항)
+            
+        Returns:
+            Segmentation Mask가 그려진 PIL Image
+        """
+        sam_result = draw_segmentation_masks(
+            image=result.image_path,
+            masks=result.masks,
+            labels=result.labels,
+        )
+        
+        if output_path:
+            save_visualization(sam_result, output_path)
+        
+        return sam_result
     
     def process_directory(
         self,
         image_dir: str,
         text_prompt: str,
-        project_id: Optional[int] = None,
+        output_dir: Optional[str] = None,
         confidence_threshold: Optional[float] = None,
-        batch_size: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        format: Optional[str] = None,
+    ) -> List[LabelingResult]:
         """
-        디렉터리의 모든 이미지 처리 및 Label Studio 업로드
+        디렉터리의 모든 이미지 처리
         
         Args:
             image_dir: 이미지 디렉터리 경로
             text_prompt: 텍스트 프롬프트
-            project_id: Label Studio 프로젝트 ID (None이면 config 사용)
+            output_dir: 출력 디렉터리 (None이면 config 사용)
             confidence_threshold: Confidence threshold
-            batch_size: 배치 크기 (None이면 config 사용)
+            format: 출력 포맷
         
         Returns:
-            처리 결과 통계
+            처리 결과 리스트
         """
-        if project_id is None:
-            project_id = self.config.ls_project_id
-            if project_id is None:
-                raise ValueError("project_id가 필요합니다 (인자 또는 환경변수 LS_PROJECT_ID)")
+        if output_dir is None:
+            output_dir = self.config.output_dir
         
-        if batch_size is None:
-            batch_size = self.config.batch_size
+        if format is None:
+            format = self.config.output_format
+        
+        # 출력 디렉터리 생성
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
         
         # 이미지 파일 찾기
         image_dir_path = Path(image_dir)
@@ -171,84 +385,44 @@ class LabelingPipeline:
         
         logger.info(f"{len(image_files)}개 이미지 파일 발견")
         
-        # 통계
-        stats = {
-            "total": len(image_files),
-            "processed": 0,
-            "failed": 0,
-            "tasks_created": 0,
-            "predictions_uploaded": 0,
-        }
+        results = []
+        coco_datasets = []
         
-        # 배치 처리
-        for i in range(0, len(image_files), batch_size):
-            batch_files = image_files[i:i + batch_size]
-            logger.info(f"배치 {i//batch_size + 1} 처리 중: {len(batch_files)}개 파일")
-            
-            # 태스크 생성
-            tasks = []
-            for image_file in batch_files:
-                try:
-                    # 로컬 파일 경로를 Label Studio가 접근할 수 있는 형태로 변환
-                    # 실제 환경에서는 서버에 마운트된 경로나 URL 사용 필요
-                    task_data = {
-                        "data": {
-                            "image": str(image_file.absolute())
-                        }
-                    }
-                    tasks.append(task_data)
-                except Exception as e:
-                    logger.error(f"태스크 생성 실패 ({image_file}): {e}")
-                    stats["failed"] += 1
-            
-            if not tasks:
-                continue
-            
-            # Label Studio에 태스크 업로드
+        for i, image_file in enumerate(image_files):
             try:
-                created_tasks = self.ls_client.create_tasks(project_id, tasks)
-                stats["tasks_created"] += len(created_tasks)
-                logger.info(f"{len(created_tasks)}개 태스크 생성됨")
-            except Exception as e:
-                logger.error(f"태스크 업로드 실패: {e}")
-                stats["failed"] += len(tasks)
-                continue
-            
-            # 각 이미지 처리 및 예측 업로드
-            predictions = []
-            for image_file, task in zip(batch_files, created_tasks):
-                try:
-                    # 이미지 처리
-                    results = self.process_image_to_ls_format(
-                        str(image_file),
-                        text_prompt,
-                        confidence_threshold,
-                    )
-                    
-                    if results:
-                        prediction = {
-                            "task": task["id"],
-                            "result": results,
-                            "score": float(np.mean([r.get("score", 0.5) for r in results])),
-                        }
-                        predictions.append(prediction)
-                        stats["processed"] += 1
-                    else:
-                        logger.warning(f"검출 결과 없음: {image_file}")
-                        stats["processed"] += 1  # 처리됨으로 간주
+                logger.info(f"[{i+1}/{len(image_files)}] 처리 중: {image_file.name}")
                 
-                except Exception as e:
-                    logger.error(f"이미지 처리 실패 ({image_file}): {e}")
-                    stats["failed"] += 1
-            
-            # 예측 업로드
-            if predictions:
-                try:
-                    uploaded = self.ls_client.upload_predictions(project_id, predictions)
-                    stats["predictions_uploaded"] += len(uploaded)
-                    logger.info(f"{len(uploaded)}개 예측 업로드됨")
-                except Exception as e:
-                    logger.error(f"예측 업로드 실패: {e}")
+                result = self.process_image(
+                    image_file,
+                    text_prompt,
+                    confidence_threshold,
+                )
+                results.append(result)
+                
+                # 포맷에 따라 저장
+                if format == "yolo":
+                    label_path = output_path / f"{image_file.stem}.txt"
+                    self.export_yolo(result, str(label_path), save_classes=(i == 0))
+                elif format == "coco":
+                    coco_data = self.coco_converter.convert(
+                        boxes=result.boxes,
+                        scores=result.scores,
+                        labels=result.labels,
+                        masks=result.masks if result.has_masks else None,
+                        image_id=i + 1,
+                        image_width=result.image_width,
+                        image_height=result.image_height,
+                        image_filename=image_file.name,
+                    )
+                    coco_datasets.append(coco_data)
+                
+            except Exception as e:
+                logger.error(f"이미지 처리 실패 ({image_file}): {e}")
         
-        logger.info(f"처리 완료: {stats}")
-        return stats
+        # COCO의 경우 하나의 파일로 병합
+        if format == "coco" and coco_datasets:
+            merged_coco = self.coco_converter.merge(coco_datasets)
+            self.coco_converter.save(merged_coco, str(output_path / "annotations.json"))
+        
+        logger.info(f"처리 완료: {len(results)}/{len(image_files)}개 이미지")
+        return results

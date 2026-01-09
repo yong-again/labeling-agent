@@ -56,3 +56,10 @@ Thumbs.db
 test_images/
 output/
 
+# images
+images/
+uploads/
+
+# temp files
+
+temp.py

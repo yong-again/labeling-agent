@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DINO-SAM Labeling Agent</title>
+    <meta name="description" content="Auto-labeling with Grounding DINO + SAM">
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <span class="logo-icon">🎯</span>
+                <h1>DINO-SAM Labeling Agent</h1>
+            </div>
+            <div class="stats-bar" id="statsBar">
+                <div class="stat-item">
+                    <span class="stat-value" id="statTotal">0</span>
+                    <span class="stat-label">Total</span>
+                </div>
+                <div class="stat-item pending">
+                    <span class="stat-value" id="statPending">0</span>
+                    <span class="stat-label">Pending</span>
+                </div>
+                <div class="stat-item approved">
+                    <span class="stat-value" id="statApproved">0</span>
+                    <span class="stat-label">Approved</span>
+                </div>
+                <div class="stat-item rejected">
+                    <span class="stat-value" id="statRejected">0</span>
+                    <span class="stat-label">Rejected</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Left Panel: Upload & Controls -->
+            <aside class="panel left-panel">
+                <div class="panel-section">
+                    <h2>📤 Image Upload</h2>
+                    <div class="upload-zone" id="uploadZone">
+                        <div class="upload-icon">📁</div>
+                        <p>Drag & drop images here</p>
+                        <p class="upload-hint">or click to browse</p>
+                        <input type="file" id="fileInput" accept="image/*" multiple hidden>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h2>✏️ Prompt</h2>
+                    <div class="prompt-input-wrap">
+                        <textarea id="promptInput" placeholder="Enter detection prompt (e.g., 'person. car. dog')"></textarea>
+                        <div class="prompt-hint">Separate classes with periods (.)</div>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h2>⚙️ Settings</h2>
+                    <div class="setting-item">
+                        <label for="confidenceSlider">Confidence: <span id="confidenceValue">0.35</span></label>
+                        <input type="range" id="confidenceSlider" min="0.1" max="0.9" step="0.05" value="0.35">
+                    </div>
+                    <div class="setting-item">
+                        <label for="formatSelect">Export Format</label>
+                        <select id="formatSelect">
+                            <option value="coco">COCO Format</option>
+                            <option value="yolo">YOLO Format</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <button class="btn btn-primary btn-full" id="labelBtn" disabled>
+                        🚀 Run Labeling
+                    </button>
+                </div>
+            </aside>
+
+            <!-- Center: Image Canvas -->
+            <section class="canvas-section">
+                <div class="canvas-container" id="canvasContainer">
+                    <div class="canvas-placeholder" id="canvasPlaceholder">
+                        <div class="placeholder-icon">🖼️</div>
+                        <p>Upload an image to start</p>
+                    </div>
+                    <canvas id="imageCanvas"></canvas>
+                    <div class="loading-overlay" id="loadingOverlay" hidden>
+                        <div class="spinner"></div>
+                        <p>Processing...</p>
+                    </div>
+                </div>
+                
+                <!-- HITL Controls -->
+                <div class="hitl-controls" id="hitlControls" hidden>
+                    <div class="hitl-info">
+                        <span class="hitl-label">Review:</span>
+                        <span class="hitl-count" id="hitlCount">0 objects detected</span>
+                    </div>
+                    <div class="hitl-buttons">
+                        <button class="btn btn-reject" id="rejectBtn" title="Reject (Bad Quality)">
+                            ❌ Reject
+                        </button>
+                        <button class="btn btn-approve" id="approveBtn" title="Approve (Good Quality)">
+                            ✅ Approve
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Panel: Results & Export -->
+            <aside class="panel right-panel">
+                <div class="panel-section">
+                    <h2>📊 Detection Results</h2>
+                    <div class="results-list" id="resultsList">
+                        <div class="results-empty">No results yet</div>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h2>💾 Export</h2>
+                    <button class="btn btn-secondary btn-full" id="exportBtn" disabled>
+                        Export Labels
+                    </button>
+                </div>
+
+                <div class="panel-section">
+                    <h2>📝 Review Queue</h2>
+                    <div class="queue-list" id="queueList">
+                        <div class="queue-empty">No pending reviews</div>
+                    </div>
+                </div>
+            </aside>
+        </main>
+
+        <!-- Toast Notification -->
+        <div class="toast" id="toast"></div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

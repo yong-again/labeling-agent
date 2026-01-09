@@ -19,3 +19,13 @@ python-dotenv>=1.0.0
 # Note: segment-anything는 별도 설치 필요
 # pip install git+https://github.com/facebookresearch/segment-anything.git
 
+# Web Server
+fastapi>=0.100.0
+uvicorn>=0.22.0
+python-multipart>=0.0.6
+
+# Database (for HITL feedback)
+aiosqlite>=0.19.0
+
+# Templates
+jinja2>=3.1.0

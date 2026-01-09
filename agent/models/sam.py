@@ -35,7 +35,7 @@ class SAM:
     
     def __init__(
         self,
-        model_type: str = "sam_vit_h",
+        model_type: str = "vit_h",
         checkpoint_path: Optional[str] = None,
         device: Optional[str] = None,
     ):
@@ -60,61 +60,17 @@ class SAM:
         self.predictor = None
         self._load_model()
     
-    def _normalize_model_type(self) -> str:
-        """
-        model_type을 sam_model_registry에서 사용하는 형식으로 변환
-        
-        Returns:
-            'vit_h', 'vit_l', 'vit_b' 또는 'default'
-        """
-        model_type_lower = self.model_type.lower()
-        
-        # sam_vit_h, sam_vit_l, sam_vit_b 형식을 vit_h, vit_l, vit_b로 변환
-        if model_type_lower.startswith("sam_vit_"):
-            return model_type_lower.replace("sam_vit_", "vit_")
-        # 이미 vit_h, vit_l, vit_b 형식이면 그대로 사용
-        elif model_type_lower in ["vit_h", "vit_l", "vit_b"]:
-            return model_type_lower
-        # default는 그대로 사용
-        elif model_type_lower == "default":
-            return "default"
-        # 기본값: vit_h
-        else:
-            logger.warning(f"알 수 없는 모델 타입: {self.model_type}, 'vit_h' 사용")
-            return "vit_h"
-    
     def _load_model(self):
         """모델 로드"""
-        # model_type을 sam_model_registry 형식으로 변환
-        registry_model_type = self._normalize_model_type()
-        
-        logger.info(f"SAM 모델 로드 중: {self.model_type} -> {registry_model_type} (device: {self.device})")
+        logger.info(f"SAM 모델 로드 중: {self.model_type}")
         
         try:
-            # 체크포인트 경로 확인
-            if self.checkpoint_path is None:
-                checkpoint_url = self.MODEL_CHECKPOINTS.get(self.model_type)
-                if checkpoint_url:
-                    import os
-                    import urllib.request
-                    checkpoint_dir = os.path.expanduser("~/.cache/sam")
-                    os.makedirs(checkpoint_dir, exist_ok=True)
-                    self.checkpoint_path = os.path.join(
-                        checkpoint_dir, f"{self.model_type}.pth"
-                    )
-                    
-                    if not os.path.exists(self.checkpoint_path):
-                        logger.info(f"체크포인트 다운로드 중: {checkpoint_url}")
-                        urllib.request.urlretrieve(checkpoint_url, self.checkpoint_path)
-                        logger.info("다운로드 완료")
-                else:
-                    raise ValueError(f"알 수 없는 모델 타입: {self.model_type}")
-            
-            # 모델 로드: sam_model_registry에서 변환된 model_type 사용
-            sam = sam_model_registry[registry_model_type](checkpoint=self.checkpoint_path)
+            # 모델 로드
+            sam = sam_model_registry[self.model_type](checkpoint=self.checkpoint_path)
             sam.to(device=self.device)
             self.predictor = SamPredictor(sam)
             logger.info("모델 로드 완료")
+        
         except Exception as e:
             logger.error(f"모델 로드 실패: {e}")
             raise
@@ -129,7 +85,7 @@ class SAM:
         
         Args:
             image: PIL Image
-            boxes: (N, 4) numpy array [x1, y1, x2, y2] (정규화 좌표 0-1)
+            boxes: (N, 4) numpy array [x1, y1, x2, y2]
         
         Returns:    
             masks: List of (H, W) binary numpy arrays
@@ -153,16 +109,14 @@ class SAM:
         # 이미지 크기
         h, w = image_np.shape[:2]
         
-        # 박스를 픽셀 좌표로 변환
-        # boxes는 정규화 좌표 [x1, y1, x2, y2] (0-1 범위)
-        boxes_pixel = boxes.copy()
-        boxes_pixel[:, [0, 2]] *= w  # x 좌표
-        boxes_pixel[:, [1, 3]] *= h  # y 좌표
-        
-        # SAM 형식으로 변환: (N, 4) -> (N, 4) [x1, y1, x2, y2]
+        # boxes는 이미 픽셀 좌표 [x1, y1, x2, y2] (DINO에서 denormalize된 상태)
         # SAM predict_torch는 boxes를 torch.Tensor로 받음
         # 형식: (N, 4) where each row is [x1, y1, x2, y2] in pixel coordinates
-        sam_boxes = torch.from_numpy(boxes_pixel).to(self.device)
+        
+        # transform.apply_boxes_torch를 사용하여 SAM 입력 형식으로 변환
+        h, w = image_np.shape[:2]
+        box_tensor = torch.tensor(boxes, device=self.device, dtype=torch.float32)
+        transformed_boxes = self.predictor.transform.apply_boxes_torch(box_tensor, (h, w))
         
         # 마스크 예측
         # predict_torch는 배치 처리를 위한 메서드
@@ -171,15 +125,15 @@ class SAM:
             masks, scores, _ = self.predictor.predict_torch(
                 point_coords=None,
                 point_labels=None,
-                boxes=sam_boxes,
+                boxes=transformed_boxes,
                 multimask_output=False,
             )
         except (AttributeError, TypeError) as e:
             # predict_torch가 없는 경우 predict 사용 (순차 처리)
             logger.warning(f"predict_torch를 사용할 수 없습니다 ({e}). predict로 대체합니다.")
             masks_list = []
-            for box in boxes_pixel:
-                # SAM predict는 box를 numpy array로 받음 [x1, y1, x2, y2]
+            for box in boxes:
+                # SAM predict는 box를 numpy array로 받음 [x1, y1, x2, y2] (픽셀 좌표)
                 mask, score, _ = self.predictor.predict(
                     point_coords=None,
                     point_labels=None,
@@ -194,6 +148,18 @@ class SAM:
         masks_list = [masks_np[i, 0] for i in range(masks_np.shape[0])]  # List of (H, W)
         
         logger.debug(f"{len(masks_list)}개 마스크 생성됨")
+        
+        # 디버그: 마스크 생성 결과 상세 정보
+        if len(masks_list) > 0:
+            image_h, image_w = image_np.shape[:2]
+            logger.debug(f"[SAM 상세] 이미지 크기: {image_w}x{image_h}")
+            for i, mask in enumerate(masks_list):
+                mask_area = int(mask.sum())
+                mask_ratio = mask_area / (image_w * image_h) * 100
+                mask_h, mask_w = mask.shape
+                logger.debug(f"  [{i+1}] 마스크 크기: {mask_w}x{mask_h}, "
+                           f"영역: {mask_area} 픽셀 ({mask_ratio:.2f}%), "
+                           f"True 픽셀: {mask_area}, False 픽셀: {mask_w*mask_h - mask_area}")
         
         return masks_list
     
