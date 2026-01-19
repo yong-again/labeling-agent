@@ -1,8 +1,9 @@
 from groundingdino.util.inference import load_model, load_image, predict, annotate
+
 import cv2
 
-model = load_model("/workspace/labeling-agent/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "/workspace/labeling-agent/weights/groundingdino_swint_ogc.pth")
-IMAGE_PATH = "/workspace/labeling-agent/images/05RJPvJXAr5b5EolJzx9zVx-1.fit_lim.size_625x365.v1740431187.jpg"
+model = load_model("/workspace/labeling-agent/agent/model_config/GroundingDINO_SwinT_OGC.py", "/workspace/labeling-agent/weights/groundingdino_swint_ogc.pth")
+IMAGE_PATH = "../images/05RJPvJXAr5b5EolJzx9zVx-1.fit_lim.size_625x365.v1740431187.jpg"
 TEXT_PROMPT = "phone"
 BOX_TRESHOLD = 0.35
 TEXT_TRESHOLD = 0.25
