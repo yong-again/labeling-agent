@@ -288,7 +288,7 @@ boxes, scores, labels = dino.predict(
     text_threshold=0.25
 )
 
-# boxes: (N, 4) [x1, y1, x2, y2] 정규화 좌표 (0-1)
+# boxes: (N, 4) [cx, cy, W, H] 정규화 좌표 (0-1)
 # scores: (N,) confidence scores
 # labels: List[str] 검출된 클래스
 ```
@@ -297,22 +297,40 @@ boxes, scores, labels = dino.predict(
 
 ```python
 from agent.models.sam import SAM
-from PIL import Image
+from agent.utils.image_loader import load_image
 
 # 모델 초기화
-sam = SAM(model_name="sam_vit_h", device="cuda")
+sam = SAM(model_type="vit_h", device="cuda")
 
 # 이미지 로드
-image = Image.open("/path/to/image.jpg")
+image_source, image_transformed, pil_image = load_image("/path/to/image.jpg")
 
 # Bounding Box로 마스크 생성
-masks = sam.predict(
-    image=image,
-    boxes=boxes,           # (N, 4) [x1, y1, x2, y2] 픽셀 좌표
-    multimask_output=False
+masks = sam.predict_from_boxes(
+    image_source=image_source,  # numpy array (H, W, 3) BGR
+    boxes=boxes,                # (N, 4) [x1, y1, x2, y2] 픽셀 좌표
 )
 
 # masks: List[np.ndarray] 각 박스에 대한 binary 마스크
+```
+
+### 좌표 변환 유틸리티
+
+```python
+from agent.utils.box_transforms import cxcywh_to_xyxy, xyxy_to_cxcywh
+import torch
+
+# DINO의 정규화된 [cx, cy, w, h]를 픽셀 [x1, y1, x2, y2]로 변환
+boxes_cxcywh = torch.tensor([[0.5, 0.5, 0.4, 0.3]])  # 정규화 좌표
+boxes_xyxy = cxcywh_to_xyxy(
+    boxes_cxcywh,
+    image_width=1920,
+    image_height=1080,
+    normalized=True
+)
+
+# 역변환
+boxes_back = xyxy_to_cxcywh(boxes_xyxy, 1920, 1080, normalize=True)
 ```
 
 ### 파이프라인 (DINO + SAM)

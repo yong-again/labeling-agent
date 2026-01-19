@@ -111,7 +111,6 @@ class SAM:
         # 형식: (N, 4) where each row is [x1, y1, x2, y2] in pixel coordinates
         
         # transform.apply_boxes_torch를 사용하여 SAM 입력 형식으로 변환
-        h, w = image_np.shape[:2]
         box_tensor = torch.tensor(boxes, device=self.device, dtype=torch.float32)
         transformed_boxes = self.predictor.transform.apply_boxes_torch(box_tensor, (h, w))
         

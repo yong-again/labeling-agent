@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple, Union
 from pathlib import Path
 import numpy as np
 from PIL import Image
+import torch
 
 from agent.config import Config
 from agent.models.dino import GroundingDINO
@@ -17,6 +18,7 @@ from agent.converters.coco_format import COCOConverter
 from agent.converters.yolo_format import YOLOConverter
 from agent.utils.visualize import draw_bounding_boxes, draw_segmentation_masks, draw_dino_and_sam, save_visualization
 from agent.utils.image_loader import load_image
+from agent.utils.box_transforms import cxcywh_to_xyxy
 
 logger = logging.getLogger(__name__)
 
@@ -111,39 +113,54 @@ class LabelingPipeline:
         image_source, image_transformed, pil_image = load_image(image_path)
         image_width, image_height = pil_image.size
         
-        # DINO: Bounding box 검출
+        # DINO: Bounding box 검출 (정규화된 [cx, cy, w, h] 반환)
         logger.info(f"DINO 검출 실행: prompt='{text_prompt}', threshold={confidence_threshold}")
-        boxes, scores, labels = self.dino.predict(
+        boxes_cxcywh, scores, labels = self.dino.predict(
             image_source=image_source,
             image_transformed=image_transformed,
             text_prompt=text_prompt,
             box_threshold=confidence_threshold,
         )
         
-        if len(boxes) == 0:
+        if len(boxes_cxcywh) == 0:
             logger.warning("검출된 박스가 없습니다")
             return LabelingResult(
                 image_path=image_path,
                 image_width=image_width,
                 image_height=image_height,
-                boxes=boxes,
+                boxes=np.array([]).reshape(0, 4),
                 scores=scores,
                 labels=labels,
                 masks=[],
                 prompt=text_prompt,
             )
         
-        # SAM: Box -> Mask 변환
-        logger.info(f"SAM 마스크 생성: {len(boxes)}개 박스")
-        masks = self.sam.predict_from_boxes(image_source, boxes)
+        # 좌표 변환: [cx, cy, w, h] (정규화) -> [x1, y1, x2, y2] (픽셀)
+        logger.debug(f"좌표 변환: [cx, cy, w, h] (정규화) -> [x1, y1, x2, y2] (픽셀)")
+        boxes_xyxy = cxcywh_to_xyxy(
+            boxes_cxcywh,
+            image_width=image_width,
+            image_height=image_height,
+            normalized=True,
+        )
         
-        logger.info(f"라벨링 완료: {len(boxes)}개 객체 검출")
+        # torch.Tensor -> numpy array 변환
+        if isinstance(boxes_xyxy, torch.Tensor):
+            boxes_xyxy_np = boxes_xyxy.cpu().numpy()
+        else:
+            boxes_xyxy_np = boxes_xyxy
+        
+        # SAM: Box -> Mask 변환
+        logger.info(f"SAM 마스크 생성: {len(boxes_xyxy_np)}개 박스")
+        masks = self.sam.predict_from_boxes(image_source, boxes_xyxy_np)
+        
+        logger.info(f"라벨링 완료: {len(boxes_xyxy_np)}개 객체 검출")
         
         return LabelingResult(
             image_path=image_path,
             image_width=image_width,
             image_height=image_height,
-            boxes=boxes,
+            boxes=boxes_xyxy_np,
             scores=scores,
             labels=labels,
             masks=masks,

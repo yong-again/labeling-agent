@@ -162,7 +162,7 @@ class GroundingDINO:
         text_prompt: str,
         box_threshold: float = 0.35,
         text_threshold: float = 0.25,
-    ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    ) -> Tuple[torch.Tensor, np.ndarray, List[str]]:
         """
         이미지에서 오브젝트 검출
         
@@ -174,7 +174,7 @@ class GroundingDINO:
             text_threshold: 텍스트 매칭 threshold
         
         Returns:
-            boxes: (N, 4) numpy array [x1, y1, x2, y2] (픽셀 좌표)
+            boxes: (N, 4) torch.Tensor [cx, cy, w, h] (정규화 좌표 0-1)
             scores: (N,) numpy array confidence scores
             labels: List[str] 클래스 레이블
         """
@@ -198,60 +198,30 @@ class GroundingDINO:
         # 결과 후처리
         if len(boxes) == 0:
             logger.debug("검출된 박스가 없습니다")
-            return np.array([]).reshape(0, 4), np.array([]), []
+            return torch.empty(0, 4), np.array([]), []
         
-        # boxes는 [cx, cy, w, h] 형식으로 반환됨 (정규화 좌표 0-1)
-        # [x1, y1, x2, y2] 형식으로 변환 (픽셀 좌표)
-        
-        # 원본 이미지 크기 사용
-        h, w, _ = image_source.shape
-        
-        # 텐서 연산을 활용한 효율적 변환
-        device = boxes.device
-        scale_fct = torch.tensor([w, h, w, h], device=device)
-        boxes_scaled = boxes * scale_fct
-        
-        # cxcywh -> x1y1x2y2 변환
-        x1y1 = boxes_scaled[:, :2] - boxes_scaled[:, 2:] / 2
-        x2y2 = boxes_scaled[:, :2] + boxes_scaled[:, 2:] / 2
-        boxes_xyxy = torch.cat([x1y1, x2y2], dim=-1)
-        
-        # 클리핑 (이미지 경계 밖으로 나가는 것 방지)
-        boxes_xyxy[:, [0, 2]] = boxes_xyxy[:, [0, 2]].clamp(0, w)
-        boxes_xyxy[:, [1, 3]] = boxes_xyxy[:, [1, 3]].clamp(0, h)
-        
-        boxes_np = boxes_xyxy.cpu().numpy()
+        # boxes는 [cx, cy, w, h] 형식 (정규화 좌표 0-1)
+        # 변환 없이 그대로 반환
         
         scores_np = logits.cpu().numpy()
         
         # phrases에서 클래스 이름 추출
-        # phrases 형식: "phone", "screen" 등
         labels = [phrase.strip() for phrase in phrases]
         
-        logger.info(f"{len(boxes_np)}개 박스 검출됨")
-        
-        # # 결과 시각화 저장(for debug)
-        # annotated_frame = annotate(
-        #     image_source=image_source,
-        #     boxes=boxes,
-        #     logits=logits,
-        #     phrases=phrases,
-        # )
-        # output_path = Path(image_path).stem + "_dino_result.jpg"
-        # cv2.imwrite(output_path, annotated_frame)
-        # logger.info(f"DINO 결과 저장: {output_path}")
+        logger.info(f"{len(boxes)}개 박스 검출됨")
         
         # 디버그: 검출 결과 상세 정보
         logger.debug(f"[DINO 상세] 검출된 객체:")
+        boxes_np = boxes.cpu().numpy()
         for i, (box, score, label) in enumerate(zip(boxes_np, scores_np, labels)):
             logger.debug(f"  [{i+1}] {label}: confidence={score:.4f}, "
-                        f"box=[{box[0]:.4f}, {box[1]:.4f}, {box[2]:.4f}, {box[3]:.4f}]")
+                        f"box(normalized)=[{box[0]:.4f}, {box[1]:.4f}, {box[2]:.4f}, {box[3]:.4f}]")
         if len(scores_np) > 0:
             logger.debug(f"[DINO 상세] Confidence 통계: "
                         f"min={scores_np.min():.4f}, max={scores_np.max():.4f}, "
                         f"mean={scores_np.mean():.4f}, std={scores_np.std():.4f}")
         
-        return boxes_np, scores_np, labels
+        return boxes, scores_np, labels
     
     def predict_batch(
         self,
@@ -259,9 +229,9 @@ class GroundingDINO:
         text_prompt: str,
         box_threshold: float = 0.35,
         text_threshold: float = 0.25,
-    ) -> List[Tuple[np.ndarray, np.ndarray, List[str]]]:
+    ) -> List[Tuple[torch.Tensor, np.ndarray, List[str]]]:
         """
-        배치 예측 (현재는 순차 처리)
+        배치 예측
         
         Args:
             images: 로드된 이미지 리스트 [(image_source, image_transformed), ...]
