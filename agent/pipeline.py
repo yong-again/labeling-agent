@@ -25,14 +25,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LabelingResult:
-    """라벨링 결과 데이터 클래스"""
+    """라벨링 결과 데이터 클래스 (원본 모델 출력 저장)"""
     image_path: str
     image_width: int
     image_height: int
-    boxes: np.ndarray  # (N, 4) [x1, y1, x2, y2] (픽셀 좌표)
-    scores: np.ndarray  # (N,)
+    boxes: torch.Tensor  # (N, 4) [cx, cy, w, h] (정규화 0-1) - DINO 원본 출력
+    scores: torch.Tensor  # (N,) - DINO 원본 출력
     labels: List[str]
-    masks: List[np.ndarray]  # List of (H, W)
+    masks: torch.Tensor  # (N, 1, H, W) - SAM 원본 출력
     prompt: str
     
     @property
@@ -41,18 +41,19 @@ class LabelingResult:
     
     @property
     def has_masks(self) -> bool:
-        return len(self.masks) > 0
+        return self.masks.shape[0] > 0 if len(self.masks.shape) > 0 else False
     
     def to_dict(self) -> dict:
-        """JSON 직렬화 가능한 딕셔너리로 변환"""
+        """JSON 직렬화 가능한 딕셔너리로 변환 (원본 데이터)"""
         return {
             "image_path": self.image_path,
             "image_width": self.image_width,
             "image_height": self.image_height,
             "num_objects": self.num_objects,
             "labels": self.labels,
-            "scores": self.scores.tolist() if len(self.scores) > 0 else [],
-            "boxes": self.boxes.tolist() if len(self.boxes) > 0 else [],
+            "scores": self.scores.cpu().numpy().tolist() if len(self.scores) > 0 else [],
+            "boxes": self.boxes.cpu().numpy().tolist() if len(self.boxes) > 0 else [],
+            "masks_shape": list(self.masks.shape) if self.has_masks else [],
             "prompt": self.prompt,
         }
 
@@ -113,11 +114,12 @@ class LabelingPipeline:
         image_source, image_transformed, pil_image = load_image(image_path)
         image_width, image_height = pil_image.size
         
-        # DINO: Bounding box 검출 (정규화된 [cx, cy, w, h] 반환)
+        print(image_width, image_height)
+        
+        # DINO: Bounding box 검출 (원본 출력 반환)
         logger.info(f"DINO 검출 실행: prompt='{text_prompt}', threshold={confidence_threshold}")
         boxes_cxcywh, scores, labels = self.dino.predict(
-            image_source=image_source,
-            image_transformed=image_transformed,
+            image=image_transformed,
             text_prompt=text_prompt,
             box_threshold=confidence_threshold,
         )
@@ -128,42 +130,42 @@ class LabelingPipeline:
                 image_path=image_path,
                 image_width=image_width,
                 image_height=image_height,
-                boxes=np.array([]).reshape(0, 4),
-                scores=scores,
+                boxes=torch.tensor([], dtype=torch.float32).reshape(0, 4),
+                scores=torch.tensor([], dtype=torch.float32),
                 labels=labels,
-                masks=[],
+                masks=torch.tensor([], dtype=torch.bool).reshape(0, 1, 0, 0),
                 prompt=text_prompt,
             )
         
-        # 좌표 변환: [cx, cy, w, h] (정규화) -> [x1, y1, x2, y2] (픽셀)
-        logger.debug(f"좌표 변환: [cx, cy, w, h] (정규화) -> [x1, y1, x2, y2] (픽셀)")
+        # SAM 입력을 위해 박스를 픽셀 좌표로 변환 (SAM 내부에서만 사용)
+        logger.debug(f"SAM 입력을 위한 좌표 변환: [cx, cy, w, h] (정규화) -> [x1, y1, x2, y2] (픽셀)")
         boxes_xyxy = cxcywh_to_xyxy(
-            boxes_cxcywh,
+            boxes=boxes_cxcywh,
             image_width=image_width,
             image_height=image_height,
             normalized=True,
         )
         
-        # torch.Tensor -> numpy array 변환
-        if isinstance(boxes_xyxy, torch.Tensor):
-            boxes_xyxy_np = boxes_xyxy.cpu().numpy()
-        else:
-            boxes_xyxy_np = boxes_xyxy
+        print(boxes_xyxy)
         
-        # SAM: Box -> Mask 변환
-        logger.info(f"SAM 마스크 생성: {len(boxes_xyxy_np)}개 박스")
-        masks = self.sam.predict_from_boxes(image_source, boxes_xyxy_np)
+        # SAM: Box -> Mask 변환 (원본 출력 반환)
+        logger.info(f"SAM 마스크 생성: {len(boxes_xyxy)}개 박스")
+        masks = self.sam.predict_from_boxes(image=image_source, 
+                                            image_width=image_width,
+                                            image_height=image_height,
+                                            boxes=boxes_xyxy)
         
-        logger.info(f"라벨링 완료: {len(boxes_xyxy_np)}개 객체 검출")
+        logger.info(f"라벨링 완료: {len(boxes_cxcywh)}개 객체 검출 (원본 출력 저장)")
         
+        # 원본 출력 저장 (변환 없음)
         return LabelingResult(
             image_path=image_path,
             image_width=image_width,
             image_height=image_height,
-            boxes=boxes_xyxy_np,
-            scores=scores,
+            boxes=boxes_cxcywh,  # 원본 DINO 출력 [cx, cy, w, h] (정규화)
+            scores=scores,  # 원본 DINO 출력
             labels=labels,
-            masks=masks,
+            masks=masks,  # 원본 SAM 출력 (N, 1, H, W)
             prompt=text_prompt,
         )
     
@@ -178,7 +180,7 @@ class LabelingPipeline:
         COCO 포맷으로 내보내기
         
         Args:
-            result: LabelingResult 객체
+            result: LabelingResult 객체 (원본 출력 저장)
             output_path: 출력 파일 경로
             image_id: 이미지 ID
             use_rle: RLE 사용 여부 (False면 polygon)
@@ -186,11 +188,27 @@ class LabelingPipeline:
         Returns:
             COCO format 딕셔너리
         """
-        coco_data = self.coco_converter.convert(
+        # 원본 출력을 COCO 형식으로 변환
+        boxes_xyxy = cxcywh_to_xyxy(
             boxes=result.boxes,
-            scores=result.scores,
+            image_width=result.image_width,
+            image_height=result.image_height,
+            normalized=True,
+        )
+        boxes_np = boxes_xyxy.cpu().numpy() if isinstance(boxes_xyxy, torch.Tensor) else boxes_xyxy
+        scores_np = result.scores.cpu().numpy() if isinstance(result.scores, torch.Tensor) else result.scores
+        
+        # 마스크 변환: (N, 1, H, W) -> List of (H, W)
+        masks_list = None
+        if result.has_masks:
+            masks_np = result.masks.cpu().numpy()  # (N, 1, H, W)
+            masks_list = [masks_np[i, 0] for i in range(masks_np.shape[0])]
+        
+        coco_data = self.coco_converter.convert(
+            boxes=boxes_np,
+            scores=scores_np,
             labels=result.labels,
-            masks=result.masks if result.has_masks else None,
+            masks=masks_list,
             image_id=image_id,
             image_width=result.image_width,
             image_height=result.image_height,
@@ -211,17 +229,27 @@ class LabelingPipeline:
         YOLO 포맷으로 내보내기
         
         Args:
-            result: LabelingResult 객체
+            result: LabelingResult 객체 (원본 출력 저장)
             output_path: 출력 파일 경로
             save_classes: classes.txt 저장 여부
             
         Returns:
             YOLO format 문자열
         """
+        # 원본 출력을 YOLO 형식으로 변환
+        # YOLO는 정규화된 [cx, cy, w, h] 형식을 사용하므로 원본 DINO 출력을 그대로 사용 가능
+        boxes_np = result.boxes.cpu().numpy() if isinstance(result.boxes, torch.Tensor) else result.boxes
+        
+        # 마스크 변환: (N, 1, H, W) -> List of (H, W)
+        masks_list = None
+        if result.has_masks:
+            masks_np = result.masks.cpu().numpy()  # (N, 1, H, W)
+            masks_list = [masks_np[i, 0] for i in range(masks_np.shape[0])]
+        
         yolo_data = self.yolo_converter.convert(
-            boxes=result.boxes,
+            boxes=boxes_np,
             labels=result.labels,
-            masks=result.masks if result.has_masks else None,
+            masks=masks_list,
             image_width=result.image_width,
             image_height=result.image_height,
         )
@@ -273,7 +301,7 @@ class LabelingPipeline:
         라벨링 결과 시각화
         
         Args:
-            result: LabelingResult 객체
+            result: LabelingResult 객체 (원본 출력 저장)
             output_dir: 시각화 이미지 저장 디렉터리 (None이면 저장 안함)
             
         Returns:
@@ -282,13 +310,26 @@ class LabelingPipeline:
             - sam_result: SAM Segmentation Mask만 그린 이미지  
             - combined_result: 둘 다 그린 이미지
         """
+        # 원본 출력을 시각화용 형식으로 변환
+        from agent.utils.web_display_converter import (
+            convert_dino_boxes_for_display,
+            convert_sam_masks_for_display,
+            convert_scores_for_display,
+        )
+        
+        boxes_xyxy = convert_dino_boxes_for_display(
+            result.boxes, result.image_width, result.image_height
+        )
+        scores_np = convert_scores_for_display(result.scores)
+        masks_list = convert_sam_masks_for_display(result.masks)
+        
         dino_result, sam_result, combined_result = draw_dino_and_sam(
             image=result.image_path,
-            boxes=result.boxes,
+            boxes=boxes_xyxy,
             labels=result.labels,
-            masks=result.masks,
-            scores=result.scores,
-            normalized=False,
+            masks=masks_list,
+            scores=scores_np,
+            normalized=False,  # 픽셀 좌표
         )
         
         # 저장
@@ -315,18 +356,29 @@ class LabelingPipeline:
         DINO Bounding Box만 시각화
         
         Args:
-            result: LabelingResult 객체
+            result: LabelingResult 객체 (원본 출력 저장)
             output_path: 저장 경로 (선택사항)
             
         Returns:
             Bounding Box가 그려진 PIL Image
         """
+        # 원본 출력을 시각화용 형식으로 변환
+        from agent.utils.web_display_converter import (
+            convert_dino_boxes_for_display,
+            convert_scores_for_display,
+        )
+        
+        boxes_xyxy = convert_dino_boxes_for_display(
+            result.boxes, result.image_width, result.image_height
+        )
+        scores_np = convert_scores_for_display(result.scores)
+        
         dino_result = draw_bounding_boxes(
             image=result.image_path,
-            boxes=result.boxes,
+            boxes=boxes_xyxy,
             labels=result.labels,
-            scores=result.scores,
-            normalized=False,  # DINO는 이제 픽셀 좌표를 반환
+            scores=scores_np,
+            normalized=False,  # 픽셀 좌표
         )
         
         if output_path:
@@ -343,15 +395,20 @@ class LabelingPipeline:
         SAM Segmentation Mask만 시각화
         
         Args:
-            result: LabelingResult 객체
+            result: LabelingResult 객체 (원본 출력 저장)
             output_path: 저장 경로 (선택사항)
             
         Returns:
             Segmentation Mask가 그려진 PIL Image
         """
+        # 원본 출력을 시각화용 형식으로 변환
+        from agent.utils.web_display_converter import convert_sam_masks_for_display
+        
+        masks_list = convert_sam_masks_for_display(result.masks)
+        
         sam_result = draw_segmentation_masks(
             image=result.image_path,
-            masks=result.masks,
+            masks=masks_list,
             labels=result.labels,
         )
         
@@ -423,11 +480,27 @@ class LabelingPipeline:
                     label_path = output_path / f"{image_file.stem}.txt"
                     self.export_yolo(result, str(label_path), save_classes=(i == 0))
                 elif format == "coco":
-                    coco_data = self.coco_converter.convert(
+                    # 원본 출력을 COCO 형식으로 변환
+                    boxes_xyxy = cxcywh_to_xyxy(
                         boxes=result.boxes,
-                        scores=result.scores,
+                        image_width=result.image_width,
+                        image_height=result.image_height,
+                        normalized=True,
+                    )
+                    boxes_np = boxes_xyxy.cpu().numpy() if isinstance(boxes_xyxy, torch.Tensor) else boxes_xyxy
+                    scores_np = result.scores.cpu().numpy() if isinstance(result.scores, torch.Tensor) else result.scores
+                    
+                    # 마스크 변환: (N, 1, H, W) -> List of (H, W)
+                    masks_list = None
+                    if result.has_masks:
+                        masks_np = result.masks.cpu().numpy()  # (N, 1, H, W)
+                        masks_list = [masks_np[j, 0] for j in range(masks_np.shape[0])]
+                    
+                    coco_data = self.coco_converter.convert(
+                        boxes=boxes_np,
+                        scores=scores_np,
                         labels=result.labels,
-                        masks=result.masks if result.has_masks else None,
+                        masks=masks_list,
                         image_id=i + 1,
                         image_width=result.image_width,
                         image_height=result.image_height,

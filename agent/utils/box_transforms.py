@@ -5,6 +5,7 @@ Bounding Box 좌표 변환 유틸리티
 import numpy as np
 import torch
 from typing import Union, Tuple
+torch.set_printoptions(sci_mode=False, precision=4)
 
 
 def cxcywh_to_xyxy(
@@ -38,6 +39,7 @@ def cxcywh_to_xyxy(
         if normalized:
             scale_fct = torch.tensor([image_width, image_height, image_width, image_height], device=device)
             boxes_scaled = boxes * scale_fct
+            
         else:
             boxes_scaled = boxes
         
@@ -45,7 +47,7 @@ def cxcywh_to_xyxy(
         x1y1 = boxes_scaled[:, :2] - boxes_scaled[:, 2:] / 2
         x2y2 = boxes_scaled[:, :2] + boxes_scaled[:, 2:] / 2
         boxes_xyxy = torch.cat([x1y1, x2y2], dim=-1)
-        
+
         # 클리핑 (이미지 경계 밖으로 나가는 것 방지)
         boxes_xyxy[:, [0, 2]] = boxes_xyxy[:, [0, 2]].clamp(0, image_width)
         boxes_xyxy[:, [1, 3]] = boxes_xyxy[:, [1, 3]].clamp(0, image_height)

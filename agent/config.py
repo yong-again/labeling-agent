@@ -44,8 +44,8 @@ class Config:
     dino_model_name: str = "groundingdino_swint_ogc"
     dino_config_path: Optional[str] = '/workspace/labeling-agent/agent/model_config/GroundingDINO_SwinT_OGC_cfg.py'
     dino_checkpoint_path: Optional[str] = "/workspace/labeling-agent/weights/groundingdino_swint_ogc.pth"
-    sam_model_name: str = "vit_h"
-    sam_checkpoint_path: Optional[str] = "/workspace/labeling-agent/weights/sam_vit_h_4b8939.pth"
+    sam_model_name: str = "vit_l"
+    sam_checkpoint_path: Optional[str] = "/workspace/labeling-agent/weights/sam_vit_l_0b3195.pth"
     
     # 파이프라인 설정
     confidence_threshold: float = 0.35

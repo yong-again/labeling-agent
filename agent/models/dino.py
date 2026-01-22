@@ -10,16 +10,13 @@ from pathlib import Path
 import torch
 import numpy as np
 from PIL import Image
-import cv2
-import warnings
-
-warnings.filterwarnings("ignore")
 
 try:
     from groundingdino.util.inference import load_model, load_image, predict, annotate
     from groundingdino.util.slconfig import SLConfig
     from groundingdino.util.utils import clean_state_dict
     import groundingdino
+    import torchvision.transforms as T
     GROUNDING_DINO_AVAILABLE = True
 except ImportError:
     GROUNDING_DINO_AVAILABLE = False
@@ -157,25 +154,23 @@ class GroundingDINO:
     
     def predict(
         self,
-        image_source: np.ndarray,
-        image_transformed: torch.Tensor,
+        image: torch.Tensor,
         text_prompt: str,
         box_threshold: float = 0.35,
         text_threshold: float = 0.25,
-    ) -> Tuple[torch.Tensor, np.ndarray, List[str]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
         """
         이미지에서 오브젝트 검출
         
         Args:
-            image_source: numpy array (H, W, 3) - BGR 형식
-            image_transformed: torch.Tensor - DINO 모델 입력용 전처리된 이미지
+            image: transformed image
             text_prompt: 텍스트 프롬프트 (예: "phone. screen. crack")
             box_threshold: 박스 confidence threshold
             text_threshold: 텍스트 매칭 threshold
         
         Returns:
-            boxes: (N, 4) torch.Tensor [cx, cy, w, h] (정규화 좌표 0-1)
-            scores: (N,) numpy array confidence scores
+            boxes: (N, 4) torch.Tensor [cx, cy, w, h] (정규화 좌표 0-1) - 원본 DINO 출력
+            scores: (N,) torch.Tensor confidence scores - 원본 DINO 출력
             labels: List[str] 클래스 레이블
         """
         if self.model is None:
@@ -183,10 +178,7 @@ class GroundingDINO:
         
         logger.debug(f"검출 실행: prompt='{text_prompt}', threshold={box_threshold}")
         
-        # 이미지는 이미 로드됨 - image_source와 image_transformed 직접 사용
-        image = image_transformed
-        
-        # 예측
+        # 예측 (image_transformed를 사용해야 함)
         boxes, logits, phrases = predict(
             model=self.model,
             image=image,
@@ -194,53 +186,43 @@ class GroundingDINO:
             box_threshold=box_threshold,
             text_threshold=text_threshold,
         )
-
+        
         # 결과 후처리
         if len(boxes) == 0:
             logger.debug("검출된 박스가 없습니다")
-            return torch.empty(0, 4), np.array([]), []
-        
-        # boxes는 [cx, cy, w, h] 형식 (정규화 좌표 0-1)
-        # 변환 없이 그대로 반환
-        
-        scores_np = logits.cpu().numpy()
+            return torch.tensor([], dtype=torch.float32).reshape(0, 4), torch.tensor([], dtype=torch.float32), []
         
         # phrases에서 클래스 이름 추출
+        # phrases 형식: "phone", "screen" 등
         labels = [phrase.strip() for phrase in phrases]
         
         logger.info(f"{len(boxes)}개 박스 검출됨")
         
-        # 디버그: 검출 결과 상세 정보
-        logger.debug(f"[DINO 상세] 검출된 객체:")
+        # 디버그: 검출 결과 상세 정보 (numpy로 변환하여 로깅)
         boxes_np = boxes.cpu().numpy()
+        scores_np = logits.cpu().numpy()
+        logger.debug(f"[DINO 상세] 검출된 객체:")
         for i, (box, score, label) in enumerate(zip(boxes_np, scores_np, labels)):
             logger.debug(f"  [{i+1}] {label}: confidence={score:.4f}, "
-                        f"box(normalized)=[{box[0]:.4f}, {box[1]:.4f}, {box[2]:.4f}, {box[3]:.4f}]")
+                        f"box=[{box[0]:.4f}, {box[1]:.4f}, {box[2]:.4f}, {box[3]:.4f}]")
         if len(scores_np) > 0:
             logger.debug(f"[DINO 상세] Confidence 통계: "
                         f"min={scores_np.min():.4f}, max={scores_np.max():.4f}, "
                         f"mean={scores_np.mean():.4f}, std={scores_np.std():.4f}")
         
-        return boxes, scores_np, labels
+        # 원본 출력 반환 (변환 없음)
+        return boxes, logits, labels
     
     def predict_batch(
         self,
-        images: List[Tuple[np.ndarray, torch.Tensor]],
+        images: List[Image.Image],
         text_prompt: str,
         box_threshold: float = 0.35,
         text_threshold: float = 0.25,
-    ) -> List[Tuple[torch.Tensor, np.ndarray, List[str]]]:
-        """
-        배치 예측
-        
-        Args:
-            images: 로드된 이미지 리스트 [(image_source, image_transformed), ...]
-            text_prompt: 텍스트 프롬프트
-            box_threshold: 박스 confidence threshold
-            text_threshold: 텍스트 매칭 threshold
-        """
+    ) -> List[Tuple[np.ndarray, np.ndarray, List[str]]]:
+        """배치 예측 (현재는 순차 처리)"""
         results = []
-        for image_source, image_transformed in images:
-            result = self.predict(image_source, image_transformed, text_prompt, box_threshold, text_threshold)
+        for image in images:
+            result = self.predict(image, text_prompt, box_threshold, text_threshold)
             results.append(result)
         return results
