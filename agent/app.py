@@ -193,16 +193,47 @@ async def label_image(request: LabelRequest):
                 status=FeedbackStatus.PENDING,
             )
         
-        # 시각화용 데이터 추가 (픽셀 좌표를 퍼센트로 변환)
+        # 시각화용 데이터 추가
+        import cv2
+        import base64
+        import numpy as np
+        from io import BytesIO
+        from PIL import Image as PILImage
+        
+        # 박스를 픽셀 좌표 xyxy 형식으로 변환
+        from agent.utils.box_transforms import cxcywh_to_xyxy
+        boxes_xyxy = cxcywh_to_xyxy(
+            result.boxes,
+            result.image_width,
+            result.image_height,
+            normalized=True
+        )
+        
+        # 박스를 퍼센트로 변환 (웹 표시용)
         result_dict["boxes_percent"] = []
-        if len(result.boxes) > 0:
-            for box in result.boxes:
+        if len(boxes_xyxy) > 0:
+            for box in boxes_xyxy:
                 result_dict["boxes_percent"].append({
                     "x": float(box[0] / result.image_width * 100),
                     "y": float(box[1] / result.image_height * 100),
                     "width": float((box[2] - box[0]) / result.image_width * 100),
                     "height": float((box[3] - box[1]) / result.image_height * 100),
                 })
+        
+        # 마스크를 base64로 인코딩 (웹 표시용)
+        result_dict["masks_base64"] = []
+        if result.has_masks:
+            masks_np = result.masks.cpu().numpy()  # (N, 1, H, W)
+            for i in range(masks_np.shape[0]):
+                mask_2d = masks_np[i, 0]  # (H, W)
+                # 0-255로 변환
+                mask_img = (mask_2d * 255).astype(np.uint8)
+                # PNG로 인코딩
+                pil_img = PILImage.fromarray(mask_img)
+                buffer = BytesIO()
+                pil_img.save(buffer, format='PNG')
+                mask_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                result_dict["masks_base64"].append(mask_base64)
         
         return {
             "success": True,

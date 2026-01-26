@@ -284,41 +284,118 @@ function drawResults(result) {
             img.onload = () => {
                 ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                 
-                // Draw boxes
-                result.boxes_percent.forEach((box, index) => {
-                    const x = (box.x / 100) * canvas.width;
-                    const y = (box.y / 100) * canvas.height;
-                    const w = (box.width / 100) * canvas.width;
-                    const h = (box.height / 100) * canvas.height;
-                    
-                    // Get color for this class
-                    const color = getClassColor(index);
-                    
-                    // Draw box
-                    ctx.strokeStyle = color;
-                    ctx.lineWidth = 2;
-                    ctx.strokeRect(x, y, w, h);
-                    
-                    // Draw label background
-                    const label = result.labels[index];
-                    const score = (result.scores[index] * 100).toFixed(1);
-                    const text = `${label} ${score}%`;
-                    
-                    ctx.font = 'bold 12px Inter, sans-serif';
-                    const textWidth = ctx.measureText(text).width;
-                    
-                    ctx.fillStyle = color;
-                    ctx.fillRect(x, y - 20, textWidth + 8, 20);
-                    
-                    // Draw label text
-                    ctx.fillStyle = '#fff';
-                    ctx.fillText(text, x + 4, y - 6);
-                });
+                // Draw masks first (underneath boxes)
+                if (result.masks_base64 && result.masks_base64.length > 0) {
+                    drawMasks(ctx, result, canvas);
+                } else {
+                    // If masks are loaded, draw boxes after; otherwise draw immediately
+                    drawBoxes(ctx, result, canvas);
+                }
             };
             img.src = e.target.result;
         };
         reader.readAsDataURL(state.currentImage);
     }
+}
+
+function drawMasks(ctx, result, canvas) {
+    // Load and draw all masks
+    let masksLoaded = 0;
+    const totalMasks = result.masks_base64.length;
+    
+    result.masks_base64.forEach((maskBase64, index) => {
+        const maskImg = new Image();
+        maskImg.onload = () => {
+            // Save context state
+            ctx.save();
+            
+            // Get color for this class
+            const color = getClassColor(index);
+            const rgb = hexToRgb(color);
+            
+            // Create temporary canvas for mask
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = canvas.width;
+            tempCanvas.height = canvas.height;
+            const tempCtx = tempCanvas.getContext('2d');
+            
+            // Draw mask at correct size
+            tempCtx.drawImage(maskImg, 0, 0, canvas.width, canvas.height);
+            
+            // Get mask image data
+            const imageData = tempCtx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            
+            // Apply color overlay where mask is active
+            for (let i = 0; i < data.length; i += 4) {
+                if (data[i] > 128) { // If mask pixel is white
+                    data[i] = rgb.r;     // Red
+                    data[i + 1] = rgb.g; // Green
+                    data[i + 2] = rgb.b; // Blue
+                    data[i + 3] = 100;   // Alpha (semi-transparent)
+                } else {
+                    data[i + 3] = 0;     // Transparent
+                }
+            }
+            
+            // Draw colored mask
+            tempCtx.putImageData(imageData, 0, 0);
+            ctx.drawImage(tempCanvas, 0, 0);
+            
+            // Restore context state
+            ctx.restore();
+            
+            masksLoaded++;
+            
+            // Draw boxes after all masks are loaded
+            if (masksLoaded === totalMasks) {
+                drawBoxes(ctx, result, canvas);
+            }
+        };
+        maskImg.src = 'data:image/png;base64,' + maskBase64;
+    });
+}
+
+function drawBoxes(ctx, result, canvas) {
+    // Draw boxes
+    result.boxes_percent.forEach((box, index) => {
+        const x = (box.x / 100) * canvas.width;
+        const y = (box.y / 100) * canvas.height;
+        const w = (box.width / 100) * canvas.width;
+        const h = (box.height / 100) * canvas.height;
+        
+        // Get color for this class
+        const color = getClassColor(index);
+        
+        // Draw box
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x, y, w, h);
+        
+        // Draw label background
+        const label = result.labels[index];
+        const score = (result.scores[index] * 100).toFixed(1);
+        const text = `${label} ${score}%`;
+        
+        ctx.font = 'bold 14px Inter, sans-serif';
+        const textWidth = ctx.measureText(text).width;
+        
+        ctx.fillStyle = color;
+        ctx.fillRect(x, Math.max(y - 24, 0), textWidth + 12, 24);
+        
+        // Draw label text
+        ctx.fillStyle = '#fff';
+        ctx.fillText(text, x + 6, Math.max(y - 6, 18));
+    });
+}
+
+function hexToRgb(hex) {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+    return result ? {
+        r: parseInt(result[1], 16),
+        g: parseInt(result[2], 16),
+        b: parseInt(result[3], 16)
+    } : { r: 0, g: 0, b: 0 };
 }
 
 function getClassColor(index) {

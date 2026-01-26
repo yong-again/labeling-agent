@@ -146,8 +146,6 @@ class LabelingPipeline:
             normalized=True,
         )
         
-        print(boxes_xyxy)
-        
         # SAM: Box -> Mask 변환 (원본 출력 반환)
         logger.info(f"SAM 마스크 생성: {len(boxes_xyxy)}개 박스")
         masks = self.sam.predict_from_boxes(image=image_source, 

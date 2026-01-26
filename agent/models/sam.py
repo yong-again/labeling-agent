@@ -81,16 +81,23 @@ class SAM:
         boxes: torch.Tensor,
         image_width: int,
         image_height: int,
+        multimask_output: bool = False,
     ) -> torch.Tensor:
         """
         Bounding box로부터 마스크 생성
         
         Args:
             image: numpy array (H, W, 3) - BGR 형식 (ImageLoader에서 로드)
-            boxes: (N, 4) numpy array [x1, y1, x2, y2] (픽셀 좌표)
+            boxes: (N, 4) torch.Tensor [x1, y1, x2, y2] (픽셀 좌표)
+            image_width: 이미지 너비
+            image_height: 이미지 높이
+            multimask_output: True면 각 박스당 3개의 마스크 후보 반환 (N, 3, H, W), 
+                            False면 1개만 반환 (N, 1, H, W)
         
         Returns:    
-            masks: (N, 1, H, W) torch.Tensor - 원본 SAM 출력 (변환 없음)
+            masks: torch.Tensor 
+                - multimask_output=False: (N, 1, H, W)
+                - multimask_output=True: (N, 3, H, W)
         """
         if self.predictor is None:
             raise RuntimeError("모델이 로드되지 않았습니다")
@@ -101,41 +108,18 @@ class SAM:
         # SAM에 이미지 설정
         self.predictor.set_image(image)
         
-        # transform.apply_boxes_torch를 사용하여 SAM 입력 형식으로 변환
-        boxes = boxes.to(self.predictor.device)
-        
-        transformed_boxes = self.predictor.transform.apply_boxes_torch(boxes, (image_height, image_width))
-        print(transformed_boxes)
+        #SAM input은 1024x1024 이므로 box도 이미지 해상도에 맞게끔 transform
+        transformed_boxes = self.predictor.transform.apply_boxes_torch(boxes, image.shape[:2])
+        transformed_boxes = transformed_boxes.to(self.predictor.device)
         
         # 마스크 예측
-        # predict_torch는 배치 처리를 위한 메서드
-        # boxes가 (N, 4) 형식이면 각 박스에 대해 마스크 생성
-        # try:
         masks, scores, _ = self.predictor.predict_torch(
             point_coords=None,
             point_labels=None,
             boxes=transformed_boxes,
-            multimask_output=False,
+            multimask_output=multimask_output,
         )
-        # except (AttributeError, TypeError) as e:
-        #     # predict_torch가 없는 경우 predict 사용 (순차 처리)
-        #     logger.warning(f"predict_torch를 사용할 수 없습니다 ({e}). predict로 대체합니다.")
-        #     masks_list = []
-        #     for box in boxes:
-        #         # SAM predict는 box를 numpy array로 받음 [x1, y1, x2, y2] (픽셀 좌표)
-        #         mask, score, _ = self.predictor.predict(
-        #             point_coords=None,
-        #             point_labels=None,
-        #             box=box,  # numpy array [x1, y1, x2, y2]
-        #             multimask_output=False,
-        #         )
-        #         # numpy array를 torch tensor로 변환하고 차원 추가
-        #         mask_tensor = torch.from_numpy(mask[0]).to(self.device).unsqueeze(0)  # (1, H, W)
-        #         masks_list.append(mask_tensor)
         
-        # logger.debug(f"{masks.shape[0]}개 마스크 생성됨 (shape: {masks.shape})")
-        
-        # # 원본 출력 반환 (변환 없음)
         return masks
     
     def predict_from_boxes_batch(
