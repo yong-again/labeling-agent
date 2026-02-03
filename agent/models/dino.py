@@ -203,7 +203,6 @@ class GroundingDINO:
         scores_np = logits.cpu().numpy()
         logger.info(f"[DINO 상세] 검출된 객체:")
         for i, (box, score, label) in enumerate(zip(boxes_np, scores_np, labels)):
-            print(label)
             logger.info(f"  [{i+1}] {label}: confidence={score:.4f}, "
                         f"box=[{box[0]:.4f}, {box[1]:.4f}, {box[2]:.4f}, {box[3]:.4f}]")
         if len(scores_np) > 0:

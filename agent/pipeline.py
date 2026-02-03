@@ -188,6 +188,18 @@ class LabelingPipeline:
             box_threshold=confidence_threshold,
         )
         
+        # class name이 없는 결과 삭제
+        valid_indices = [
+            i for i, lbl in enumerate(labels)
+            if lbl is not None and str(lbl).strip()
+        ]
+        if len(valid_indices) < len(labels):
+            dropped = len(labels) - len(valid_indices)
+            logger.info(f"class name 없음으로 {dropped}개 결과 제외")
+            boxes_cxcywh = boxes_cxcywh[valid_indices]
+            scores = scores[valid_indices]
+            labels = [labels[i] for i in valid_indices]
+        
         if len(boxes_cxcywh) == 0:
             logger.info("검출된 박스가 없습니다")
             return LabelingResult(

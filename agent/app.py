@@ -117,12 +117,10 @@ def _run_labeling_and_overlay(
     if result.has_masks:
         image_bgr = cv2.imread(image_path)
         if image_bgr is not None:
+            from agent.utils.colors import color_for_index_bgr
+
             masks_np = result.masks.cpu().numpy()
             overlay = image_bgr.copy()
-            palette = [
-                (0, 99, 255), (255, 144, 30), (113, 179, 60),
-                (0, 215, 255), (226, 43, 138), (204, 209, 72),
-            ]
             for i in range(masks_np.shape[0]):
                 mask_2d = masks_np[i, 0]
                 mask_binary = (mask_2d > 0).astype(np.uint8)
@@ -134,7 +132,7 @@ def _run_labeling_and_overlay(
                     )
                 if not np.any(mask_binary):
                     continue
-                color = palette[i % len(palette)]
+                color = color_for_index_bgr(i)
                 color_layer = np.zeros_like(image_bgr, dtype=np.uint8)
                 color_layer[mask_binary > 0] = color
                 overlay = cv2.addWeighted(overlay, 1.0, color_layer, 0.4, 0)
@@ -153,7 +151,7 @@ def _run_labeling_and_overlay(
 
             for i, box in enumerate(boxes_xyxy_np):
                 x1, y1, x2, y2 = map(int, box)
-                color = palette[i % len(palette)]
+                color = color_for_index_bgr(i)
                 cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
                 if i < len(result.labels):
                     label_text = f"{result.labels[i]}: {result.scores[i]:.2f}"

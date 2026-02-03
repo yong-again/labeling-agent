@@ -431,35 +431,40 @@ function drawMasks(ctx, result, canvas) {
 
 
 function drawBoxes(ctx, result, canvas) {
-    // Draw boxes
+    // 이미지 크기에 따른 스케일 (기준 600px)
+    const refSize = 600;
+    const minDim = Math.min(canvas.width, canvas.height);
+    const scale = Math.max(0.5, Math.min(2, minDim / refSize));
+    const fontSize = Math.max(10, Math.round(14 * scale));
+    const labelHeight = Math.max(18, Math.round(24 * scale));
+    const padding = Math.max(4, Math.round(6 * scale));
+    const lineWidth = Math.max(2, Math.round(3 * scale));
+
     result.boxes_percent.forEach((box, index) => {
         const x = (box.x / 100) * canvas.width;
         const y = (box.y / 100) * canvas.height;
         const w = (box.width / 100) * canvas.width;
         const h = (box.height / 100) * canvas.height;
-        
-        // Get color for this class
+
         const color = getClassColor(index);
-        
-        // Draw box
+
         ctx.strokeStyle = color;
-        ctx.lineWidth = 3;
+        ctx.lineWidth = lineWidth;
         ctx.strokeRect(x, y, w, h);
-        
-        // Draw label background
+
         const label = result.labels[index];
         const score = (result.scores[index] * 100).toFixed(1);
         const text = `${label} ${score}%`;
-        
-        ctx.font = 'bold 14px Inter, sans-serif';
+
+        ctx.font = `bold ${fontSize}px Inter, sans-serif`;
         const textWidth = ctx.measureText(text).width;
-        
+
+        const labelY = Math.max(y - labelHeight, 0);
         ctx.fillStyle = color;
-        ctx.fillRect(x, Math.max(y - 24, 0), textWidth + 12, 24);
-        
-        // Draw label text
+        ctx.fillRect(x, labelY, textWidth + padding * 2, labelHeight);
+
         ctx.fillStyle = '#fff';
-        ctx.fillText(text, x + 6, Math.max(y - 6, 18));
+        ctx.fillText(text, x + padding, labelY + labelHeight - padding);
     });
 }
 
