@@ -17,8 +17,34 @@ from agent.models.sam import SAM
 from agent.converters.coco_format import COCOConverter
 from agent.converters.yolo_format import YOLOConverter
 from agent.utils.visualize import draw_bounding_boxes, draw_segmentation_masks, draw_dino_and_sam, save_visualization
-from agent.utils.image_loader import load_image
+from agent.utils.image_loader import load_image, load_image_for_sam, get_image_size
 from agent.utils.box_transforms import cxcywh_to_xyxy
+from agent.utils.util import get_mask_cordinates
+
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+def _mask_to_polygon(mask_binary: np.ndarray) -> List[List[float]]:
+    """Binary mask to polygon segments."""
+    try:
+        import cv2
+    except ImportError:
+        logger.warning("OpenCV가 없어 polygon 변환을 건너뜁니다")
+        return []
+
+    mask_uint8 = (mask_binary * 255).astype(np.uint8)
+    contours, _ = cv2.findContours(
+        mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    polygons: List[List[float]] = []
+    for contour in contours:
+        if len(contour) < 3:
+            continue
+        contour = contour.flatten().tolist()
+        if len(contour) >= 6:
+            polygons.append(contour)
+    return polygons
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +71,26 @@ class LabelingResult:
     
     def to_dict(self) -> dict:
         """JSON 직렬화 가능한 딕셔너리로 변환 (원본 데이터)"""
+        boxes_xyxy = cxcywh_to_xyxy(
+            boxes=self.boxes,
+            image_width=self.image_width,
+            image_height=self.image_height,
+            normalized=True,
+        )
+        if isinstance(boxes_xyxy, torch.Tensor):
+            boxes_xyxy = boxes_xyxy.cpu().numpy()
+
+        mask_size = []
+        masks_polygon = []
+        if self.has_masks:
+            masks_np = self.masks.cpu().numpy()  # (N, 1, H, W)
+            mask_size = [int(masks_np.shape[2]), int(masks_np.shape[3])]
+            for i in range(masks_np.shape[0]):
+                mask_2d = masks_np[i, 0]
+                mask_binary = (mask_2d > 0).astype(np.uint8)
+                polygons = _mask_to_polygon(mask_binary)
+                masks_polygon.append(polygons)
+
         return {
             "image_path": self.image_path,
             "image_width": self.image_width,
@@ -52,8 +98,12 @@ class LabelingResult:
             "num_objects": self.num_objects,
             "labels": self.labels,
             "scores": self.scores.cpu().numpy().tolist() if len(self.scores) > 0 else [],
-            "boxes": self.boxes.cpu().numpy().tolist() if len(self.boxes) > 0 else [],
+            "boxes": boxes_xyxy.tolist() if len(boxes_xyxy) > 0 else [],
+            "boxes_format": "xyxy_pixel",
             "masks_shape": list(self.masks.shape) if self.has_masks else [],
+            "mask_size": mask_size,
+            "masks_polygon": masks_polygon,
+            "masks_format": "polygon",
             "prompt": self.prompt,
         }
 
@@ -75,6 +125,8 @@ class LabelingPipeline:
             checkpoint_path=config.dino_checkpoint_path,
             device=config.device,
         )
+        
+        # SAM 모델 초기화
         self.sam = SAM(
             model_type=config.sam_model_name,
             checkpoint_path=config.sam_checkpoint_path,
@@ -109,14 +161,26 @@ class LabelingPipeline:
         
         # 이미지 경로 문자열로 변환
         image_path = str(image_path)
+        logger.info(f"처리 중인 이미지: {image_path}")
         
-        # 이미지 로드
-        image_source, image_transformed, pil_image = load_image(image_path)
-        image_width, image_height = pil_image.size
+        # DINO용 이미지 로드 (RGB numpy array + transformed tensor)
+        image_dino, image_transformed = load_image(image_path)
+        #image_height, image_width = get_image_size(image_source=image_dino)
         
-        print(image_width, image_height)
+        image_height = image_dino.shape[0]
+        image_width = image_dino.shape[1]
         
-        # DINO: Bounding box 검출 (원본 출력 반환)
+        # SAM용 이미지 로드 (RGB numpy array)
+        image_sam = load_image_for_sam(image_path)
+        
+        # 두 이미지가 동일한지 확인
+        import numpy as np
+        images_equal = np.array_equal(image_dino, image_sam)
+        logger.info(f"이미지 크기: {image_height}x{image_width}, "
+                   f"DINO image shape: {image_dino.shape}, SAM image shape: {image_sam.shape}, "
+                   f"images_equal: {images_equal}")
+        
+        # DINO: Bounding box 검출
         logger.info(f"DINO 검출 실행: prompt='{text_prompt}', threshold={confidence_threshold}")
         boxes_cxcywh, scores, labels = self.dino.predict(
             image=image_transformed,
@@ -125,7 +189,7 @@ class LabelingPipeline:
         )
         
         if len(boxes_cxcywh) == 0:
-            logger.warning("검출된 박스가 없습니다")
+            logger.info("검출된 박스가 없습니다")
             return LabelingResult(
                 image_path=image_path,
                 image_width=image_width,
@@ -138,24 +202,31 @@ class LabelingPipeline:
             )
         
         # SAM 입력을 위해 박스를 픽셀 좌표로 변환 (SAM 내부에서만 사용)
-        logger.debug(f"SAM 입력을 위한 좌표 변환: [cx, cy, w, h] (정규화) -> [x1, y1, x2, y2] (픽셀)")
+        logger.info(f"SAM 입력을 위한 좌표 변환: [cx, cy, w, h] (정규화) -> [x1, y1, x2, y2] (픽셀)")
         boxes_xyxy = cxcywh_to_xyxy(
             boxes=boxes_cxcywh,
             image_width=image_width,
             image_height=image_height,
             normalized=True,
         )
+        logger.info(f"[cx, cy, w, h](정규화) -> [x1, y1, x2, y2] (픽셀) 변경한 값: {boxes_xyxy}")
         
-        # SAM: Box -> Mask 변환 (원본 출력 반환)
-        logger.info(f"SAM 마스크 생성: {len(boxes_xyxy)}개 박스")
-        masks = self.sam.predict_from_boxes(image=image_source, 
-                                            image_width=image_width,
-                                            image_height=image_height,
-                                            boxes=boxes_xyxy)
+        # SAM: bounding box -> segmentation mask output (SAM 래퍼 사용)
+        logger.info(f"SAM 마스크 생성: {len(boxes_xyxy)}개 박스 input (SAM 래퍼)")
         
-        logger.info(f"라벨링 완료: {len(boxes_cxcywh)}개 객체 검출 (원본 출력 저장)")
+        masks = self.sam.predict_from_boxes(
+            image=image_sam,
+            boxes=boxes_xyxy,
+            multimask_output=False,
+        )
         
-        # 원본 출력 저장 (변환 없음)
+        logger.info(f"SAM 마스크 생성 완료: {masks.shape}")
+        
+        get_mask_cordinates(masks, boxes_xyxy)
+        
+        logger.info(f"라벨링 완료: {len(boxes_cxcywh)}개 객체 검출")
+        
+        # 원본 출력 저장
         return LabelingResult(
             image_path=image_path,
             image_width=image_width,

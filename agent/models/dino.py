@@ -15,8 +15,8 @@ try:
     from groundingdino.util.inference import load_model, load_image, predict, annotate
     from groundingdino.util.slconfig import SLConfig
     from groundingdino.util.utils import clean_state_dict
+    import groundingdino.datasets.transforms as T
     import groundingdino
-    import torchvision.transforms as T
     GROUNDING_DINO_AVAILABLE = True
 except ImportError:
     GROUNDING_DINO_AVAILABLE = False
@@ -147,7 +147,7 @@ class GroundingDINO:
                 device=self.device,
             )
             self.model.eval()
-            logger.info("모델 로드 완료")
+            logger.info("dino 모델 로드 완료")
         except Exception as e:
             logger.error(f"모델 로드 실패: {e}")
             raise
@@ -176,7 +176,7 @@ class GroundingDINO:
         if self.model is None:
             raise RuntimeError("모델이 로드되지 않았습니다")
         
-        logger.debug(f"검출 실행: prompt='{text_prompt}', threshold={box_threshold}")
+        logger.info(f"검출 실행: prompt='{text_prompt}', threshold={box_threshold}")
         
         # 예측 (image_transformed를 사용해야 함)
         boxes, logits, phrases = predict(
@@ -189,7 +189,7 @@ class GroundingDINO:
         
         # 결과 후처리
         if len(boxes) == 0:
-            logger.debug("검출된 박스가 없습니다")
+            logger.info("검출된 박스가 없습니다")
             return torch.tensor([], dtype=torch.float32).reshape(0, 4), torch.tensor([], dtype=torch.float32), []
         
         # phrases에서 클래스 이름 추출
@@ -201,12 +201,13 @@ class GroundingDINO:
         # 디버그: 검출 결과 상세 정보 (numpy로 변환하여 로깅)
         boxes_np = boxes.cpu().numpy()
         scores_np = logits.cpu().numpy()
-        logger.debug(f"[DINO 상세] 검출된 객체:")
+        logger.info(f"[DINO 상세] 검출된 객체:")
         for i, (box, score, label) in enumerate(zip(boxes_np, scores_np, labels)):
-            logger.debug(f"  [{i+1}] {label}: confidence={score:.4f}, "
+            print(label)
+            logger.info(f"  [{i+1}] {label}: confidence={score:.4f}, "
                         f"box=[{box[0]:.4f}, {box[1]:.4f}, {box[2]:.4f}, {box[3]:.4f}]")
         if len(scores_np) > 0:
-            logger.debug(f"[DINO 상세] Confidence 통계: "
+            logger.info(f"[DINO 상세] Confidence 통계: "
                         f"min={scores_np.min():.4f}, max={scores_np.max():.4f}, "
                         f"mean={scores_np.mean():.4f}, std={scores_np.std():.4f}")
         
