@@ -105,15 +105,6 @@ class SAM:
         if len(boxes) == 0:
             return torch.tensor([], dtype=torch.bool).reshape(0, 1, 0, 0)
         
-        # 싱글톤 사용 시 상태 오염 방지: SAM 모델과 predictor를 매번 재생성
-        from segment_anything import sam_model_registry, SamPredictor
-        logger.info("SAM 모델을 새로 생성합니다 (상태 오염 완전 방지)")
-        sam = sam_model_registry[self.model_type](checkpoint=self.checkpoint_path)
-        sam.to(device=self.device)
-        sam.eval()
-        self.predictor = SamPredictor(sam)
-        logger.info(f"SAM 재생성 완료 (training mode: {sam.training})")
-        
         # 디버그: 이미지 정보 출력 (첫 픽셀값 추가)
         first_pixel = image[0, 0, :] if len(image.shape) == 3 else image[0, 0]
         logger.info(f"SAM input image - shape: {image.shape}, dtype: {image.dtype}, "
@@ -127,7 +118,7 @@ class SAM:
         transformed_boxes = self.predictor.transform.apply_boxes_torch(boxes, image.shape[:2])
         transformed_boxes = transformed_boxes.to(self.predictor.device)
         
-        logger.info(f"transformed_boxes:{transformed_boxes} in sam.py")
+        #logger.info(f"transformed_boxes:{transformed_boxes} in sam.py")
         
         # 마스크 예측
         masks, scores, _ = self.predictor.predict_torch(

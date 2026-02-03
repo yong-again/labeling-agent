@@ -202,14 +202,14 @@ class LabelingPipeline:
             )
         
         # SAM 입력을 위해 박스를 픽셀 좌표로 변환 (SAM 내부에서만 사용)
-        logger.info(f"SAM 입력을 위한 좌표 변환: [cx, cy, w, h] (정규화) -> [x1, y1, x2, y2] (픽셀)")
+        logger.info(f"SAM 입력을 위한 좌표 변환: [cx, cy, w, h] (정규화) -> [x1, y1, x2, y2] (픽셀)")  
         boxes_xyxy = cxcywh_to_xyxy(
             boxes=boxes_cxcywh,
             image_width=image_width,
             image_height=image_height,
             normalized=True,
         )
-        logger.info(f"[cx, cy, w, h](정규화) -> [x1, y1, x2, y2] (픽셀) 변경한 값: {boxes_xyxy}")
+        #logger.info(f"[cx, cy, w, h](정규화) -> [x1, y1, x2, y2] (픽셀) 변경한 값: {boxes_xyxy}")
         
         # SAM: bounding box -> segmentation mask output (SAM 래퍼 사용)
         logger.info(f"SAM 마스크 생성: {len(boxes_xyxy)}개 박스 input (SAM 래퍼)")
@@ -222,7 +222,7 @@ class LabelingPipeline:
         
         logger.info(f"SAM 마스크 생성 완료: {masks.shape}")
         
-        get_mask_cordinates(masks, boxes_xyxy)
+        #get_mask_cordinates(masks, boxes_xyxy)
         
         logger.info(f"라벨링 완료: {len(boxes_cxcywh)}개 객체 검출")
         
