@@ -10,8 +10,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Literal
+import numpy as np
 
 from agent.feedback import FeedbackManager, FeedbackStatus
+from agent.utils.box_transforms import cxcywh_to_xyxy, denormalize_boxes
 
 logger = logging.getLogger(__name__)
 
@@ -118,17 +120,18 @@ class DataCollector:
                 )
             else:
                 # COCO annotations
+                boxes_xyxy = self._coerce_boxes_xyxy_pixel(
+                    labels_data=labels_data,
+                    image_width=image_info["width"],
+                    image_height=image_info["height"],
+                )
                 for j, label in enumerate(labels_data.get("labels", [])):
-                    boxes = labels_data.get("boxes", [])
                     scores = labels_data.get("scores", [])
                     
-                    if j < len(boxes):
-                        box = boxes[j]
-                        # 정규화 좌표를 픽셀 좌표로 변환
-                        x1 = box[0] * image_info["width"]
-                        y1 = box[1] * image_info["height"]
-                        w = (box[2] - box[0]) * image_info["width"]
-                        h = (box[3] - box[1]) * image_info["height"]
+                    if j < len(boxes_xyxy):
+                        x1, y1, x2, y2 = boxes_xyxy[j]
+                        w = x2 - x1
+                        h = y2 - y1
                         
                         annotation = {
                             "id": len(annotations) + 1,
@@ -160,27 +163,65 @@ class DataCollector:
             metadata=metadata,
             output_dir=str(output_path),
         )
+
+    def _coerce_boxes_xyxy_pixel(
+        self,
+        labels_data: Dict[str, Any],
+        image_width: int,
+        image_height: int,
+    ) -> np.ndarray:
+        boxes = labels_data.get("boxes", [])
+        boxes_format = labels_data.get("boxes_format")
+
+        if not boxes:
+            return np.array([]).reshape(0, 4)
+
+        boxes_np = np.array(boxes, dtype=float)
+        if boxes_np.size == 0:
+            return boxes_np.reshape(0, 4)
+
+        if boxes_format == "xyxy_pixel":
+            return boxes_np
+        if boxes_format == "xyxy_normalized":
+            return denormalize_boxes(boxes_np, image_width, image_height)
+        if boxes_format == "cxcywh_normalized":
+            return cxcywh_to_xyxy(boxes_np, image_width, image_height, normalized=True)
+
+        max_val = float(np.max(boxes_np))
+        min_val = float(np.min(boxes_np))
+        if 0 <= min_val and max_val <= 1.5:
+            if np.any(boxes_np[:, 2] < boxes_np[:, 0]) or np.any(boxes_np[:, 3] < boxes_np[:, 1]):
+                return cxcywh_to_xyxy(boxes_np, image_width, image_height, normalized=True)
+            return denormalize_boxes(boxes_np, image_width, image_height)
+
+        return boxes_np
     
     def _save_yolo_labels(self, labels_data: Dict[str, Any], output_path: Path):
         """YOLO 형식 라벨 저장"""
         lines = []
         
         labels = labels_data.get("labels", [])
-        boxes = labels_data.get("boxes", [])
+        boxes_xyxy = self._coerce_boxes_xyxy_pixel(
+            labels_data=labels_data,
+            image_width=labels_data.get("image_width", 1920),
+            image_height=labels_data.get("image_height", 1080),
+        )
         
         # 클래스 이름 -> ID 매핑 (간단히 순서대로)
         class_map = {name: i for i, name in enumerate(set(labels))}
         
-        for i, (label, box) in enumerate(zip(labels, boxes)):
+        for i, (label, box) in enumerate(zip(labels, boxes_xyxy)):
             if len(box) < 4:
                 continue
             
             class_id = class_map.get(label, 0)
-            # 정규화 좌표 -> YOLO 중심 좌표
-            x_center = (box[0] + box[2]) / 2
-            y_center = (box[1] + box[3]) / 2
-            width = box[2] - box[0]
-            height = box[3] - box[1]
+            image_width = labels_data.get("image_width", 1920)
+            image_height = labels_data.get("image_height", 1080)
+            # 픽셀 좌표 -> YOLO 중심 좌표 (정규화)
+            x_center = ((box[0] + box[2]) / 2) / image_width
+            y_center = ((box[1] + box[3]) / 2) / image_height
+            width = (box[2] - box[0]) / image_width
+            height = (box[3] - box[1]) / image_height
             
             lines.append(f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}")
         
