@@ -19,6 +19,17 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.vscode/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+*.pyzwzw
+*.pyzwzwz
 
 # Virtual Environment
 venv/
@@ -65,3 +76,5 @@ uploads/
 
 # notebook folder
 /notebooks/
+
+/GroundingDINO/
