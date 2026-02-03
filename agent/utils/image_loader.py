@@ -9,64 +9,73 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 import torch
+import cv2
 
 try:
-    from groundingdino.util.inference import load_image as dino_load_image
-    GROUNDING_DINO_AVAILABLE = True
+    import groundingdino.datasets.transforms as T
 except ImportError:
-    GROUNDING_DINO_AVAILABLE = False
+    raise ImportError(
+        "groundingdino.datasets.transforms이 설치되지 않았습니다.\n"
+        "설치: pip install groundingdino-py"
+    )
 
 logger = logging.getLogger(__name__)
 
 
 class ImageLoader:
-    """이미지 로더 클래스 - 여러 모델에서 사용할 수 있는 표준화된 이미지 로딩"""
+    """이미지 로더 클래스 - DINO와 SAM용 이미지 로딩 분리"""
     
     @staticmethod
-    def load_image(image_path: Union[str, Path]) -> Tuple[np.ndarray, torch.Tensor, Image.Image]:
+    def load_image_for_dino(image_path: Union[str, Path]) -> Tuple[np.ndarray, torch.Tensor]:
         """
-        이미지 로드 - DINO와 SAM에서 공통으로 사용할 수 있는 형식으로 반환
+        DINO 모델용 이미지 로드
         
         Args:
             image_path: 이미지 파일 경로
             
         Returns:
-            image_source: numpy array (H, W, 3) - BGR 형식 (OpenCV 호환)
+            image: numpy array (H, W, 3) - RGB 형식
             image_transformed: torch.Tensor - DINO 모델 입력용 전처리된 이미지
-            pil_image: PIL.Image - SAM 등에서 사용
         """
         image_path = str(image_path)
         
-        if not GROUNDING_DINO_AVAILABLE:
-            raise ImportError(
-                "Grounding DINO가 설치되지 않았습니다.\n"
-                "이미지 로딩을 위해 설치가 필요합니다: pip install groundingdino-py"
-            )
+        transform = T.Compose([
+            T.RandomResize([800], max_size=1333),
+            T.ToTensor(),
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
         
-        # DINO load_image 사용 (image_source: np.ndarray BGR, image: torch.Tensor)
-        image_source, image_transformed = dino_load_image(image_path)
+        image_source = Image.open(image_path).convert("RGB")
+        image = np.asarray(image_source)  # RGB numpy array
+        image_transformed, _ = transform(image_source, None)
         
-        # PIL Image도 생성 (SAM 및 기타 용도)
-        pil_image = Image.open(image_path).convert("RGB")
+        logger.debug(f"DINO 이미지 로드 완료: {image_path}, 크기: {image.shape}")
         
-        logger.debug(f"이미지 로드 완료: {image_path}, 크기: {pil_image.size}")
-        
-        return image_source, image_transformed, pil_image
+        return image, image_transformed
     
     @staticmethod
-    def load_image_for_sam(image_source: np.ndarray) -> np.ndarray:
+    def load_image_for_sam(image_path: Union[str, Path]) -> np.ndarray:
         """
-        SAM 모델용 이미지 전처리
+        SAM 모델용 이미지 로드 (OpenCV 사용, RGB 반환)
         
         Args:
-            image_source: numpy array (H, W, 3) - BGR 형식
+            image_path: 이미지 파일 경로
             
         Returns:
-            image_np: numpy array (H, W, 3) - RGB 형식
+            image_rgb: numpy array (H, W, 3) - RGB 형식
         """
-        # BGR to RGB 변환 (image_source는 BGR)
-        import cv2
-        image_rgb = cv2.cvtColor(image_source, cv2.COLOR_BGR2RGB)
+        image_path = str(image_path)
+        
+        # OpenCV로 로드 (BGR)
+        image_bgr = cv2.imread(image_path)
+        if image_bgr is None:
+            raise ValueError(f"이미지를 로드할 수 없습니다: {image_path}")
+        
+        # BGR to RGB 변환
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        
+        logger.debug(f"SAM 이미지 로드 완료: {image_path}, 크기: {image_rgb.shape}")
+        
         return image_rgb
     
     @staticmethod
@@ -78,22 +87,48 @@ class ImageLoader:
             image_source: numpy array (H, W, 3)
             
         Returns:
-            (width, height) 튜플
+            (height, width) 튜플
         """
         h, w = image_source.shape[:2]
-        return w, h
+        return h, w
 
 
-def load_image(image_path: Union[str, Path]) -> Tuple[np.ndarray, torch.Tensor, Image.Image]:
+def load_image(image_path: Union[str, Path]) -> Tuple[np.ndarray, torch.Tensor]:
     """
-    편의 함수: ImageLoader.load_image의 래퍼
+    DINO 모델용 이미지 로드 (편의 함수)
     
     Args:
         image_path: 이미지 파일 경로
         
     Returns:
-        image_source: numpy array (H, W, 3)
+        image: numpy array (H, W, 3) - RGB 형식
         image_transformed: torch.Tensor - DINO 모델 입력용
-        pil_image: PIL.Image
     """
-    return ImageLoader.load_image(image_path)
+    return ImageLoader.load_image_for_dino(image_path)
+
+
+def load_image_for_sam(image_path: Union[str, Path]) -> np.ndarray:
+    """
+    SAM 모델용 이미지 로드 (편의 함수)
+    
+    Args:
+        image_path: 이미지 파일 경로
+        
+    Returns:
+        image_rgb: numpy array (H, W, 3) - RGB 형식
+    """
+    return ImageLoader.load_image_for_sam(image_path)
+
+
+def get_image_size(image_source: np.ndarray) -> Tuple[int, int]:
+    """
+    이미지 크기 반환
+    
+    Args:
+        image_source: numpy array (H, W, 3)
+        
+    Returns:
+        (height, width) 튜플
+    """
+    h, w = image_source.shape[:2]
+    return h, w

@@ -68,8 +68,10 @@ class SAM:
             # 모델 로드
             sam = sam_model_registry[self.model_type](checkpoint=self.checkpoint_path)
             sam.to(device=self.device)
+            sam.eval()  # 평가 모드로 설정 (중요!)
+            self.sam_model = sam  # 모델 자체를 저장
             self.predictor = SamPredictor(sam)
-            logger.info("모델 로드 완료")
+            logger.info(f"모델 로드 완료 (training mode: {sam.training})")
         
         except Exception as e:
             logger.error(f"모델 로드 실패: {e}")
@@ -79,15 +81,13 @@ class SAM:
         self,
         image: np.ndarray,
         boxes: torch.Tensor,
-        image_width: int,
-        image_height: int,
         multimask_output: bool = False,
     ) -> torch.Tensor:
         """
         Bounding box로부터 마스크 생성
         
         Args:
-            image: numpy array (H, W, 3) - BGR 형식 (ImageLoader에서 로드)
+            image: numpy array (H, W, 3) - RGB 형식 (load_image_for_sam에서 로드)
             boxes: (N, 4) torch.Tensor [x1, y1, x2, y2] (픽셀 좌표)
             image_width: 이미지 너비
             image_height: 이미지 높이
@@ -105,12 +105,29 @@ class SAM:
         if len(boxes) == 0:
             return torch.tensor([], dtype=torch.bool).reshape(0, 1, 0, 0)
         
-        # SAM에 이미지 설정
+        # 싱글톤 사용 시 상태 오염 방지: SAM 모델과 predictor를 매번 재생성
+        from segment_anything import sam_model_registry, SamPredictor
+        logger.info("SAM 모델을 새로 생성합니다 (상태 오염 완전 방지)")
+        sam = sam_model_registry[self.model_type](checkpoint=self.checkpoint_path)
+        sam.to(device=self.device)
+        sam.eval()
+        self.predictor = SamPredictor(sam)
+        logger.info(f"SAM 재생성 완료 (training mode: {sam.training})")
+        
+        # 디버그: 이미지 정보 출력 (첫 픽셀값 추가)
+        first_pixel = image[0, 0, :] if len(image.shape) == 3 else image[0, 0]
+        logger.info(f"SAM input image - shape: {image.shape}, dtype: {image.dtype}, "
+                   f"min: {image.min():.3f}, max: {image.max():.3f}, "
+                   f"mean: {image.mean():.3f}, first_pixel: {first_pixel}")
+        
+        # SAM에 이미지 설정 (RGB 형식, image_format 생략하여 기본값 사용)
         self.predictor.set_image(image)
         
         #SAM input은 1024x1024 이므로 box도 이미지 해상도에 맞게끔 transform
         transformed_boxes = self.predictor.transform.apply_boxes_torch(boxes, image.shape[:2])
         transformed_boxes = transformed_boxes.to(self.predictor.device)
+        
+        logger.info(f"transformed_boxes:{transformed_boxes} in sam.py")
         
         # 마스크 예측
         masks, scores, _ = self.predictor.predict_torch(
@@ -119,6 +136,8 @@ class SAM:
             boxes=transformed_boxes,
             multimask_output=multimask_output,
         )
+        
+        logger.info(f"masks shape in sam.py: {masks.shape}")
         
         return masks
     
