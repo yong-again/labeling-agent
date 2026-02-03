@@ -11,7 +11,10 @@ const state = {
     currentImage: null,
     labelingResult: null,
     isProcessing: false,
+    pointSegmentMode: false,  // 클릭 세그멘테이션 모드
 };
+
+const DEBUG_MASK_RENDER = true;
 
 // ========================================
 // DOM Elements
@@ -63,6 +66,9 @@ const elements = {
 // ========================================
 
 document.addEventListener('DOMContentLoaded', () => {
+    if (DEBUG_MASK_RENDER) {
+        console.log('[mask-debug] app.js loaded');
+    }
     initializeEventListeners();
     loadStats();
     loadPendingQueue();
@@ -97,6 +103,9 @@ function initializeEventListeners() {
     
     // Export Button
     elements.exportBtn.addEventListener('click', exportLabels);
+    
+    // Canvas click for point segmentation
+    elements.imageCanvas.addEventListener('click', handleCanvasClick);
 }
 
 // ========================================
@@ -190,12 +199,23 @@ function displayImage(file) {
             canvas.height = height;
             canvas.style.display = 'block';
             
+            // Avoid smoothing artifacts on scaled masks/images
+            ctx.imageSmoothingEnabled = false;
             ctx.drawImage(img, 0, 0, width, height);
             
             // Store original dimensions
             canvas.dataset.originalWidth = img.width;
             canvas.dataset.originalHeight = img.height;
             
+            if (DEBUG_MASK_RENDER) {
+                console.log('[mask-debug] image size', {
+                    originalWidth: img.width,
+                    originalHeight: img.height,
+                    canvasWidth: canvas.width,
+                    canvasHeight: canvas.height,
+                });
+            }
+
             elements.canvasPlaceholder.style.display = 'none';
         };
         img.src = e.target.result;
@@ -271,12 +291,38 @@ async function runLabeling() {
 }
 
 function drawResults(result) {
-    if (!result || !result.boxes_percent) return;
+    if (!result) return;
     
     const canvas = elements.imageCanvas;
     const ctx = canvas.getContext('2d');
     
-    // Redraw original image first
+    // 서버에서 생성한 오버레이 이미지가 있으면 직접 표시
+    if (result.overlay_image) {
+        console.log('[overlay] 서버 생성 오버레이 이미지 사용:', result.overlay_image);
+        
+        const img = new Image();
+        img.onload = () => {
+            canvas.width = img.width;
+            canvas.height = img.height;
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(img, 0, 0);
+            
+            console.log('[overlay] 오버레이 이미지 표시 완료:', {
+                width: img.width,
+                height: img.height
+            });
+        };
+        img.onerror = () => {
+            console.error('[overlay] 오버레이 이미지 로드 실패:', result.overlay_image);
+            showToast('Failed to load overlay image', 'error');
+        };
+        img.src = result.overlay_image;
+        return;
+    }
+    
+    // 폴백: 원본 방식 (클라이언트 렌더링)
+    if (!result.boxes_percent) return;
+    
     if (state.currentImage) {
         const reader = new FileReader();
         reader.onload = (e) => {
@@ -285,7 +331,14 @@ function drawResults(result) {
                 ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                 
                 // Draw masks first (underneath boxes)
-                if (result.masks_base64 && result.masks_base64.length > 0) {
+                if (result.masks_raw && result.masks_raw.length > 0) {
+                    if (DEBUG_MASK_RENDER) {
+                        console.log('[mask-debug] drawMasks called', {
+                            masksCount: result.masks_raw.length,
+                            canvasWidth: canvas.width,
+                            canvasHeight: canvas.height,
+                        });
+                    }
                     drawMasks(ctx, result, canvas);
                 } else {
                     // If masks are loaded, draw boxes after; otherwise draw immediately
@@ -299,62 +352,83 @@ function drawResults(result) {
 }
 
 function drawMasks(ctx, result, canvas) {
-    // Load and draw all masks
-    let masksLoaded = 0;
-    const totalMasks = result.masks_base64.length;
-    
-    result.masks_base64.forEach((maskBase64, index) => {
-        const maskImg = new Image();
-        maskImg.onload = () => {
-            // Save context state
-            ctx.save();
-            
-            // Get color for this class
-            const color = getClassColor(index);
-            const rgb = hexToRgb(color);
-            
-            // Create temporary canvas for mask
-            const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = canvas.width;
-            tempCanvas.height = canvas.height;
-            const tempCtx = tempCanvas.getContext('2d');
-            
-            // Draw mask at correct size
-            tempCtx.drawImage(maskImg, 0, 0, canvas.width, canvas.height);
-            
-            // Get mask image data
-            const imageData = tempCtx.getImageData(0, 0, canvas.width, canvas.height);
-            const data = imageData.data;
-            
-            // Apply color overlay where mask is active
-            for (let i = 0; i < data.length; i += 4) {
-                if (data[i] > 128) { // If mask pixel is white
-                    data[i] = rgb.r;     // Red
-                    data[i + 1] = rgb.g; // Green
-                    data[i + 2] = rgb.b; // Blue
-                    data[i + 3] = 100;   // Alpha (semi-transparent)
+    const masks = result.masks_raw || [];
+    const maskSize = result.mask_size || [canvas.height, canvas.width];
+    const height = maskSize[0];
+    const width = maskSize[1];
+    const threshold = 0.5;
+
+    if (DEBUG_MASK_RENDER) {
+        console.log('[mask-debug] drawMasks', {
+            masksCount: masks.length,
+            maskSize,
+            canvasSize: [canvas.width, canvas.height],
+            imageSize: [result.image_width, result.image_height],
+        });
+    }
+
+    masks.forEach((maskFlat, index) => {
+        if (!Array.isArray(maskFlat) || maskFlat.length !== width * height) {
+            if (DEBUG_MASK_RENDER) {
+                console.log('[mask-debug] mask size mismatch', {
+                    index,
+                    expected: width * height,
+                    actual: maskFlat ? maskFlat.length : 0,
+                });
+            }
+            return;
+        }
+        ctx.save();
+
+        const color = getClassColor(index);
+        const rgb = hexToRgb(color);
+
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = width;
+        tempCanvas.height = height;
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCtx.imageSmoothingEnabled = false;
+
+        const imageData = tempCtx.createImageData(width, height);
+        const data = imageData.data;
+        
+        // row-major order: iterate by row then column
+        let activeCount = 0;
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const maskIdx = y * width + x;
+                const prob = maskFlat[maskIdx];
+                const dataIdx = (y * width + x) * 4;
+                if (prob > threshold) {
+                    data[dataIdx] = rgb.r;
+                    data[dataIdx + 1] = rgb.g;
+                    data[dataIdx + 2] = rgb.b;
+                    data[dataIdx + 3] = 100;
+                    activeCount++;
                 } else {
-                    data[i + 3] = 0;     // Transparent
+                    data[dataIdx + 3] = 0;
                 }
             }
-            
-            // Draw colored mask
-            tempCtx.putImageData(imageData, 0, 0);
-            ctx.drawImage(tempCanvas, 0, 0);
-            
-            // Restore context state
-            ctx.restore();
-            
-            masksLoaded++;
-            
-            // Draw boxes after all masks are loaded
-            if (masksLoaded === totalMasks) {
-                drawBoxes(ctx, result, canvas);
-            }
-        };
-        maskImg.src = 'data:image/png;base64,' + maskBase64;
+        }
+
+        if (DEBUG_MASK_RENDER) {
+            console.log('[mask-debug] mask rendered', {
+                index,
+                activePixels: activeCount,
+                totalPixels: width * height,
+                coverage: (activeCount / (width * height)).toFixed(4),
+            });
+        }
+
+        tempCtx.putImageData(imageData, 0, 0);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
     });
+
+    drawBoxes(ctx, result, canvas);
 }
+
 
 function drawBoxes(ctx, result, canvas) {
     // Draw boxes
@@ -592,4 +666,75 @@ function showToast(message, type = 'info') {
     setTimeout(() => {
         elements.toast.classList.remove('show');
     }, 3000);
+}
+
+// ========================================
+// Point Segmentation (클릭 세그멘테이션)
+// ========================================
+
+async function handleCanvasClick(e) {
+    // 이미지가 업로드되지 않았으면 무시
+    if (!state.currentImageId) {
+        return;
+    }
+    
+    // 처리 중이면 무시
+    if (state.isProcessing) {
+        return;
+    }
+    
+    const canvas = elements.imageCanvas;
+    const rect = canvas.getBoundingClientRect();
+    
+    // 캔버스 좌표 계산
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = Math.round((e.clientX - rect.left) * scaleX);
+    const y = Math.round((e.clientY - rect.top) * scaleY);
+    
+    console.log('[point-segment] 클릭:', { x, y, canvasSize: [canvas.width, canvas.height] });
+    
+    try {
+        showLoading(true);
+        state.isProcessing = true;
+        
+        const response = await fetch('/api/segment-point', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                image_id: state.currentImageId,
+                point_x: x,
+                point_y: y,
+                point_label: 1,  // foreground
+            }),
+        });
+        
+        const data = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(data.detail || 'Point segmentation failed');
+        }
+        
+        console.log('[point-segment] 결과:', data);
+        
+        // 결과 이미지 표시
+        if (data.overlay_image) {
+            const img = new Image();
+            img.onload = () => {
+                const ctx = canvas.getContext('2d');
+                ctx.imageSmoothingEnabled = false;
+                ctx.drawImage(img, 0, 0);
+            };
+            img.src = data.overlay_image;
+        }
+        
+        showToast(`Segmented: ${data.mask_pixels} pixels (score: ${data.score.toFixed(2)})`, 'success');
+        
+    } catch (error) {
+        console.error('[point-segment] 에러:', error);
+        showToast(error.message || 'Point segmentation failed', 'error');
+    } finally {
+        showLoading(false);
+        state.isProcessing = false;
+    }
 }
