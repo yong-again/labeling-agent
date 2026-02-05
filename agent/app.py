@@ -4,16 +4,20 @@ DINO-SAM 라벨링 Web UI
 """
 
 import asyncio
+import json
 import logging
 import os
 import shutil
+import tempfile
+import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Optional, List, Tuple
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Body
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -26,21 +30,25 @@ from agent.pipeline import LabelingPipeline, LabelingResult
 from agent.converters.coco_format import COCOConverter
 from agent.converters.yolo_format import YOLOConverter
 from agent.utils.box_transforms import cxcywh_to_xyxy, denormalize_boxes
+from agent.utils.logging_config import setup_logging
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# 로깅 설정
-logging.basicConfig(
+# 로깅 설정 (파일 저장 + 콘솔 색상)
+setup_logging(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    log_dir="./logs",
+    log_file="app.log",
+    enable_file=True,
+    enable_console_color=True,
 )
 logger = logging.getLogger(__name__)
 
 # FastAPI 앱 생성
 app = FastAPI(
-    title="DINO-SAM Labeling Agent",
+    title="Labeling Agent",
     description="Auto-labeling with Grounding DINO + SAM",
     version="1.0.0"
 )
@@ -60,6 +68,13 @@ pipeline: Optional[LabelingPipeline] = None
 
 # 라벨링 결과 캐시 (Export 시 사용, image_id -> LabelingResult)
 labeling_results_cache: dict = {}
+
+# Batch 작업 저장 (job_id -> { image_ids, extract_dir? })
+batch_jobs: dict = {}
+
+# 지원 확장자
+ALLOWED_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
+ALLOWED_ARCHIVE_EXT = {".zip"}
 
 
 def get_config() -> Config:
@@ -89,6 +104,7 @@ def _run_labeling_and_overlay(
     confidence_threshold: float,
     image_id: str,
     output_overlay_path: Path,
+    use_client_render: bool = False,
 ) -> Tuple[dict, LabelingResult]:
     """라벨링 + 오버레이 생성 (블로킹, 스레드풀에서 실행)"""
     pipe = get_pipeline()
@@ -114,68 +130,81 @@ def _run_labeling_and_overlay(
                 "height": float((box[3] - box[1]) / result.image_height * 100),
             })
 
-    if result.has_masks:
+    if result.has_masks and use_client_render:
+        # model output 그대로 전달 (웹에서 렌더링): masks_raw = flatten된 마스크 배열 리스트
+        masks_np = result.masks.cpu().numpy()
+        h, w = int(masks_np.shape[2]), int(masks_np.shape[3])
+        result_dict["mask_size"] = [h, w]
+        result_dict["masks_raw"] = []
+        for j in range(masks_np.shape[0]):
+            m = (masks_np[j, 0] > 0).astype(np.float32)
+            result_dict["masks_raw"].append(m.flatten(order="C").tolist())
+
+    if not use_client_render:
+        # 검출 없음(num_objects=0)이어도 원본 이미지를 overlay로 저장해 웹에 표시
         image_bgr = cv2.imread(image_path)
         if image_bgr is not None:
-            from agent.utils.colors import color_for_index_bgr
-
-            masks_np = result.masks.cpu().numpy()
             overlay = image_bgr.copy()
-            for i in range(masks_np.shape[0]):
-                mask_2d = masks_np[i, 0]
-                mask_binary = (mask_2d > 0).astype(np.uint8)
-                if mask_binary.shape != (image_bgr.shape[0], image_bgr.shape[1]):
-                    mask_binary = cv2.resize(
-                        mask_binary,
-                        (image_bgr.shape[1], image_bgr.shape[0]),
-                        interpolation=cv2.INTER_NEAREST,
-                    )
-                if not np.any(mask_binary):
-                    continue
-                color = color_for_index_bgr(i)
-                color_layer = np.zeros_like(image_bgr, dtype=np.uint8)
-                color_layer[mask_binary > 0] = color
-                overlay = cv2.addWeighted(overlay, 1.0, color_layer, 0.4, 0)
+            if result.has_masks:
+                from agent.utils.colors import color_for_index_bgr
 
-            boxes_xyxy_np = cxcywh_to_xyxy(
-                result.boxes, result.image_width, result.image_height, normalized=True
-            )
-            if isinstance(boxes_xyxy_np, torch.Tensor):
-                boxes_xyxy_np = boxes_xyxy_np.cpu().numpy()
+                masks_np = result.masks.cpu().numpy()
+                for i in range(masks_np.shape[0]):
+                    mask_2d = masks_np[i, 0]
+                    mask_binary = (mask_2d > 0).astype(np.uint8)
+                    if mask_binary.shape != (image_bgr.shape[0], image_bgr.shape[1]):
+                        mask_binary = cv2.resize(
+                            mask_binary,
+                            (image_bgr.shape[1], image_bgr.shape[0]),
+                            interpolation=cv2.INTER_NEAREST,
+                        )
+                    if not np.any(mask_binary):
+                        continue
+                    color = color_for_index_bgr(i)
+                    color_layer = np.zeros_like(image_bgr, dtype=np.uint8)
+                    color_layer[mask_binary > 0] = color
+                    overlay = cv2.addWeighted(overlay, 1.0, color_layer, 0.4, 0)
 
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = max(0.35, min(0.5, 450 / image_bgr.shape[0]))
-            thickness = max(1, int(1.5 * font_scale))
-            h_img, w_img = image_bgr.shape[:2]
-            padding = 4
+                boxes_xyxy_np = cxcywh_to_xyxy(
+                    result.boxes, result.image_width, result.image_height, normalized=True
+                )
+                if isinstance(boxes_xyxy_np, torch.Tensor):
+                    boxes_xyxy_np = boxes_xyxy_np.cpu().numpy()
 
-            for i, box in enumerate(boxes_xyxy_np):
-                x1, y1, x2, y2 = map(int, box)
-                color = color_for_index_bgr(i)
-                cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
-                if i < len(result.labels):
-                    label_text = f"{result.labels[i]}: {result.scores[i]:.2f}"
-                    (tw, th), baseline = cv2.getTextSize(label_text, font, font_scale, thickness)
-                    if y1 - th - padding - baseline >= 0:
-                        label_y = y1 - padding - baseline
-                    elif y2 + th + padding + baseline <= h_img:
-                        label_y = y2 + th + padding
-                    else:
-                        label_y = y1 + th + padding
-                    label_y = max(th + padding, min(int(label_y), h_img - baseline - padding - 2))
-                    label_x = max(0, min(x1, w_img - tw - padding * 2 - 2))
-                    r_y1 = max(0, label_y - th - padding)
-                    r_y2 = min(h_img, label_y + baseline + padding)
-                    r_x1 = max(0, int(label_x))
-                    r_x2 = min(w_img, int(label_x) + tw + padding * 2)
-                    cv2.rectangle(overlay, (r_x1, r_y1), (r_x2, r_y2), color, -1)
-                    cv2.putText(
-                        overlay, label_text, (label_x + padding, label_y),
-                        font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA,
-                    )
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                h_img, w_img = image_bgr.shape[:2]
+                font_scale = max(0.5, min(1.1, h_img / 1080.0))
+                thickness = max(1, int(1.0 * font_scale))
+                padding = max(4, int(6 * font_scale / 0.5))
+
+                for i, box in enumerate(boxes_xyxy_np):
+                    x1, y1, x2, y2 = map(int, box)
+                    color = color_for_index_bgr(i)
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
+                    if i < len(result.labels):
+                        label_text = f"{result.labels[i]}: {result.scores[i]:.2f}"
+                        (tw, th), baseline = cv2.getTextSize(label_text, font, font_scale, thickness)
+                        if y1 - th - padding - baseline >= 0:
+                            label_y = y1 - padding - baseline
+                        elif y2 + th + padding + baseline <= h_img:
+                            label_y = y2 + th + padding
+                        else:
+                            label_y = y1 + th + padding
+                        label_y = max(th + padding, min(int(label_y), h_img - baseline - padding - 2))
+                        label_x = max(0, min(x1, w_img - tw - padding * 2 - 2))
+                        r_y1 = max(0, label_y - th - padding)
+                        r_y2 = min(h_img, label_y + baseline + padding)
+                        r_x1 = max(0, int(label_x))
+                        r_x2 = min(w_img, int(label_x) + tw + padding * 2)
+                        cv2.rectangle(overlay, (r_x1, r_y1), (r_x2, r_y2), color, -1)
+                        cv2.putText(
+                            overlay, label_text, (label_x + padding, label_y),
+                            font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA,
+                        )
             output_overlay_path.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(output_overlay_path), overlay)
-            result_dict["overlay_image"] = f"/outputs/overlays/{output_overlay_path.name}"
+            # 브라우저 캐시 회피: prompt 변경 시 동일 URL이 캐시된 이전 이미지를 보여주는 문제 방지
+            result_dict["overlay_image"] = f"/outputs/overlays/{output_overlay_path.name}?t={int(time.time() * 1000)}"
 
     return result_dict, result
 
@@ -277,6 +306,7 @@ class LabelRequest(BaseModel):
     image_id: str
     prompt: str
     confidence_threshold: Optional[float] = None
+    use_client_render: bool = False  # True면 overlay 미생성, masks_raw 등 원본 데이터 반환 (웹에서 렌더링 테스트)
 
 
 class SegmentPointRequest(BaseModel):
@@ -310,7 +340,7 @@ async def startup_event():
     import numpy as np
     import random
     
-    # Random seed 고정 (완전한 재현성)
+    # Random seed 고정
     seed = 42
     random.seed(seed)
     np.random.seed(seed)
@@ -319,7 +349,7 @@ async def startup_event():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
     
-    # CUDA determinism 설정 (전역)
+    # CUDA determinism 설정
     if torch.cuda.is_available():
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
@@ -346,7 +376,7 @@ async def root():
     index_path = static_dir / "index.html"
     if index_path.exists():
         return HTMLResponse(content=index_path.read_text(encoding='utf-8'))
-    return HTMLResponse(content="<h1>DINO-SAM Labeling Agent</h1><p>Static files not found.</p>")
+    return HTMLResponse(content="<h1>Labeling Agent</h1><p>Static files not found.</p>")
 
 
 @app.post("/api/upload")
@@ -408,6 +438,7 @@ async def label_image(request: LabelRequest):
             request.confidence_threshold,
             request.image_id,
             output_overlay_path,
+            request.use_client_render,
         )
 
         labeling_results_cache[request.image_id] = result
@@ -426,6 +457,182 @@ async def label_image(request: LabelRequest):
     except Exception as e:
         logger.error(f"라벨링 실패: {e}", exc_info=True)
         raise HTTPException(500, str(e))
+
+
+def _sse_event(event: str, data: dict | str) -> str:
+    """SSE 포맷 이벤트 생성"""
+    payload = json.dumps(data) if isinstance(data, dict) else data
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+@app.post("/api/batch/upload")
+async def batch_upload(files: List[UploadFile] = File(...)):
+    """Batch 업로드 (zip 또는 2장 이상 이미지). SSE로 진행 상황 스트리밍."""
+    if not files:
+        raise HTTPException(400, "파일을 업로드하세요")
+    cfg = get_config()
+    if len(files) == 1:
+        ext = Path(files[0].filename or "").suffix.lower()
+        if ext not in ALLOWED_ARCHIVE_EXT:
+            raise HTTPException(
+                400,
+                f"단일 파일은 zip만 지원합니다. 또는 2장 이상 이미지를 선택하세요.",
+            )
+    else:
+        for f in files:
+            ext = Path(f.filename or "").suffix.lower()
+            if ext not in ALLOWED_IMAGE_EXT:
+                raise HTTPException(400, f"지원하지 않는 파일: {f.filename}")
+
+    # async generator를 동기적으로 호출할 수 없으므로, 래퍼 사용
+    job_id = str(uuid.uuid4())
+    image_ids: List[str] = []
+    extract_dir: Optional[Path] = None
+
+    async def event_generator():
+        nonlocal job_id, image_ids
+        try:
+            if len(files) == 1:
+                f = files[0]
+                yield _sse_event("stage", {"stage": "upload", "message": "업로드 완료"})
+                content = await f.read()
+                zip_path = Path(tempfile.gettempdir()) / f"{job_id}.zip"
+                zip_path.write_bytes(content)
+                yield _sse_event("stage", {"stage": "unzip", "message": "압축 해제 중"})
+
+                extract_base = Path(cfg.upload_dir) / "batch" / job_id
+                extract_base.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    img_names = [
+                        n for n in zf.namelist()
+                        if not n.endswith("/") and Path(n).suffix.lower() in ALLOWED_IMAGE_EXT
+                    ]
+                    total = len(img_names)
+                    for i, name in enumerate(img_names):
+                        zf.extract(name, extract_base)
+                        img_id = str(uuid.uuid4())
+                        ext_suffix = Path(name).suffix.lower()
+                        dest_name = f"{img_id}{ext_suffix}"
+                        extracted = extract_base / name
+                        dest = extract_base / dest_name
+                        if extracted != dest:
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.move(str(extracted), str(dest))
+                        else:
+                            dest = extracted
+                        # upload_dir에 복사 (단일/배치 동일 경로 사용)
+                        target = Path(cfg.upload_dir) / dest_name
+                        shutil.copy2(str(dest), str(target))
+                        image_ids.append(img_id)
+                        yield _sse_event("progress", {"stage": "unzip", "current": i + 1, "total": total})
+                zip_path.unlink(missing_ok=True)
+                yield _sse_event("stage", {"stage": "unzip_complete", "message": "압축 해제 완료"})
+            else:
+                yield _sse_event("stage", {"stage": "upload", "message": "이미지 저장 중"})
+                total = len(files)
+                for i, f in enumerate(files):
+                    ext = Path(f.filename or "").suffix.lower()
+                    if ext not in ALLOWED_IMAGE_EXT:
+                        continue
+                    img_id = str(uuid.uuid4())
+                    filename = f"{img_id}{ext}"
+                    file_path = Path(cfg.upload_dir) / filename
+                    with open(file_path, "wb") as buf:
+                        shutil.copyfileobj(f.file, buf)
+                    image_ids.append(img_id)
+                    yield _sse_event("progress", {"stage": "upload", "current": i + 1, "total": total})
+                yield _sse_event("stage", {"stage": "upload_complete", "message": "저장 완료"})
+
+            if len(image_ids) < 2:
+                yield _sse_event("error", {"message": "배치 라벨링에는 2장 이상의 이미지가 필요합니다."})
+                return
+
+            batch_jobs[job_id] = {"image_ids": image_ids}
+            yield _sse_event("done", {"job_id": job_id, "image_ids": image_ids, "count": len(image_ids)})
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Batch 업로드 실패: {e}", exc_info=True)
+            yield _sse_event("error", {"message": str(e)})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+class BatchLabelRequest(BaseModel):
+    job_id: str
+    prompt: str
+    confidence_threshold: Optional[float] = None
+    use_client_render: bool = False
+
+
+@app.post("/api/batch/label")
+async def batch_label(request: BatchLabelRequest):
+    """Batch 라벨링 실행. SSE로 진행 상황 스트리밍."""
+    if request.job_id not in batch_jobs:
+        raise HTTPException(404, f"배치 작업을 찾을 수 없습니다: {request.job_id}")
+    job = batch_jobs[request.job_id]
+    image_ids = job["image_ids"]
+    cfg = get_config()
+    upload_dir = Path(cfg.upload_dir)
+    conf = request.confidence_threshold or cfg.confidence_threshold
+
+    async def event_generator():
+        total = len(image_ids)
+        results = []
+        for i, image_id in enumerate(image_ids):
+            image_files = list(upload_dir.glob(f"{image_id}.*"))
+            if not image_files:
+                yield _sse_event("progress", {
+                    "stage": "labeling",
+                    "current": i + 1,
+                    "total": total,
+                    "image_id": image_id,
+                    "skipped": True,
+                    "error": "이미지를 찾을 수 없습니다",
+                })
+                continue
+            image_path = image_files[0]
+            output_overlay_path = Path(cfg.output_dir) / "overlays" / f"{image_id}_overlay.png"
+            try:
+                result_dict, result = await asyncio.to_thread(
+                    _run_labeling_and_overlay,
+                    str(image_path),
+                    request.prompt,
+                    conf,
+                    image_id,
+                    output_overlay_path,
+                    request.use_client_render,
+                )
+                labeling_results_cache[image_id] = result
+                results.append({"image_id": image_id, "result": result_dict})
+                yield _sse_event("progress", {
+                    "stage": "labeling",
+                    "current": i + 1,
+                    "total": total,
+                    "image_id": image_id,
+                    "num_objects": result.num_objects,
+                })
+            except Exception as e:
+                logger.error(f"Batch 라벨링 실패 {image_id}: {e}", exc_info=True)
+                yield _sse_event("progress", {
+                    "stage": "labeling",
+                    "current": i + 1,
+                    "total": total,
+                    "image_id": image_id,
+                    "skipped": True,
+                    "error": str(e),
+                })
+        yield _sse_event("done", {"results": results, "count": len(results)})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 @app.post("/api/segment-point")

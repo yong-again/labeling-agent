@@ -130,27 +130,104 @@ body {
    Main Content
    ======================================== */
 
-.main-content {
-    display: grid;
-    grid-template-columns: 300px 1fr 280px;
-    flex: 1;
-    overflow: hidden;
+/* ========================================
+   Tab Navigation
+   ======================================== */
+
+.tab-nav {
+    display: flex;
+    gap: var(--space-sm);
+    padding: 0 var(--space-lg);
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
 }
 
-.panel {
-    background: var(--bg-secondary);
-    border-right: 1px solid var(--border);
+.tab-btn {
+    padding: var(--space-md) var(--space-lg);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.tab-btn:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+.tab-btn.active {
+    color: var(--accent-primary);
+    border-bottom-color: var(--accent-primary);
+}
+
+.tab-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* ========================================
+   Main Content & Tabs
+   ======================================== */
+
+.main-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    background: var(--bg-primary);
+}
+
+.tab-pane {
+    display: none;
+    flex: 1;
     overflow-y: auto;
     padding: var(--space-lg);
 }
 
-.right-panel {
-    border-right: none;
-    border-left: 1px solid var(--border);
+.tab-pane.active {
+    display: flex;
+    flex-direction: column;
 }
 
+/* Tab 1: Upload Layout */
+.upload-container {
+    max-width: 800px;
+    width: 100%;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xl);
+}
+
+.settings-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-xl);
+}
+
+.label-btn-large {
+    padding: var(--space-lg);
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+/* Tab 2: Result Layout */
+.result-layout {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: var(--space-lg);
+    height: 100%;
+    overflow: hidden;
+}
+
+/* Shared Panels inside Tabs */
 .panel-section {
-    margin-bottom: var(--space-xl);
+    margin-bottom: var(--space-lg);
 }
 
 .panel-section h2 {
@@ -162,6 +239,16 @@ body {
     letter-spacing: 0.5px;
 }
 
+/* Right Panel (Results) */
+.right-panel {
+    background: var(--bg-secondary);
+    border-left: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: var(--space-lg);
+    overflow-y: auto;
+    height: 100%;
+}
+
 /* ========================================
    Upload Zone
    ======================================== */
@@ -169,7 +256,7 @@ body {
 .upload-zone {
     border: 2px dashed var(--border);
     border-radius: var(--radius-lg);
-    padding: var(--space-xl);
+    padding: var(--space-xl) 0;
     text-align: center;
     cursor: pointer;
     transition: all var(--transition-normal);
@@ -183,19 +270,81 @@ body {
 }
 
 .upload-icon {
-    font-size: 2.5rem;
-    margin-bottom: var(--space-sm);
+    font-size: 3rem;
+    margin-bottom: var(--space-md);
 }
 
 .upload-zone p {
     color: var(--text-secondary);
-    font-size: 0.875rem;
+    font-size: 1rem;
 }
 
 .upload-hint {
-    font-size: 0.75rem !important;
+    font-size: 0.8rem !important;
     color: var(--text-muted) !important;
     margin-top: var(--space-xs);
+}
+
+.upload-mode-toggle {
+    display: flex;
+    gap: var(--space-md);
+    margin-bottom: var(--space-md);
+    font-size: 0.9rem;
+    justify-content: center;
+}
+
+.upload-mode-toggle label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    cursor: pointer;
+    color: var(--text-secondary);
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast);
+}
+
+.upload-mode-toggle label:hover {
+    background: var(--bg-hover);
+}
+
+.upload-mode-toggle input[type="radio"] {
+    accent-color: var(--accent-primary);
+}
+
+.batch-progress {
+    margin-top: var(--space-md);
+    padding: var(--space-md);
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+}
+
+.batch-stage {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-bottom: var(--space-sm);
+}
+
+.batch-progress-bar {
+    height: 8px;
+    background: var(--bg-primary);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: var(--space-xs);
+}
+
+.batch-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
+    border-radius: 4px;
+    transition: width 0.2s ease;
+}
+
+.batch-progress-text {
+    font-size: 0.75rem;
+    color: var(--text-muted);
 }
 
 /* ========================================
@@ -204,14 +353,14 @@ body {
 
 .prompt-input-wrap textarea {
     width: 100%;
-    min-height: 80px;
+    min-height: 100px;
     padding: var(--space-md);
     background: var(--bg-tertiary);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     color: var(--text-primary);
     font-family: inherit;
-    font-size: 0.9rem;
+    font-size: 1rem;
     resize: vertical;
     transition: border-color var(--transition-fast);
 }
@@ -237,7 +386,7 @@ body {
 
 .setting-item label {
     display: block;
-    font-size: 0.875rem;
+    font-size: 0.9rem;
     color: var(--text-secondary);
     margin-bottom: var(--space-xs);
 }
@@ -254,7 +403,7 @@ body {
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     color: var(--text-primary);
-    font-size: 0.875rem;
+    font-size: 0.9rem;
 }
 
 /* ========================================
@@ -332,8 +481,46 @@ body {
 .canvas-section {
     display: flex;
     flex-direction: column;
-    background: var(--bg-primary);
+    background: var(--bg-secondary);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
     position: relative;
+    min-width: 0;
+    height: 100%;
+    overflow: hidden;
+}
+
+.batch-nav {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-md);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border);
+}
+
+.batch-nav-text {
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+    min-width: 4rem;
+    text-align: center;
+}
+
+.batch-results-header {
+    padding-bottom: var(--space-sm);
+}
+
+.batch-results-summary {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: var(--space-xs);
+}
+
+.export-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
 }
 
 .canvas-container {
@@ -343,7 +530,9 @@ body {
     justify-content: center;
     position: relative;
     padding: var(--space-lg);
-    overflow: hidden;
+    overflow: auto;
+    min-height: 0;
+    background: var(--bg-primary); /* Darker BG for canvas */
 }
 
 .canvas-placeholder {
@@ -357,6 +546,7 @@ body {
 }
 
 #imageCanvas {
+    display: block;
     max-width: 100%;
     max-height: 100%;
     object-fit: contain;
@@ -367,7 +557,7 @@ body {
 .loading-overlay {
     position: absolute;
     inset: 0;
-    display: none;  /* Hidden by default */
+    display: none;
     flex-direction: column;
     align-items: center;
     justify-content: center;
@@ -376,7 +566,7 @@ body {
 }
 
 .loading-overlay.active {
-    display: flex;  /* Show when active */
+    display: flex;
 }
 
 .spinner {
@@ -401,7 +591,7 @@ body {
     align-items: center;
     justify-content: space-between;
     padding: var(--space-md) var(--space-lg);
-    background: var(--bg-secondary);
+    background: var(--bg-tertiary);
     border-top: 1px solid var(--border);
 }
 
@@ -538,24 +728,20 @@ body {
    Responsive
    ======================================== */
 
-@media (max-width: 1200px) {
-    .main-content {
-        grid-template-columns: 260px 1fr 240px;
-    }
-}
-
-@media (max-width: 900px) {
-    .main-content {
+@media (max-width: 1024px) {
+    .settings-grid {
         grid-template-columns: 1fr;
-        grid-template-rows: auto 1fr auto;
     }
     
-    .panel {
-        border: none;
-        border-bottom: 1px solid var(--border);
+    .result-layout {
+        grid-template-columns: 1fr;
+        grid-template-rows: 1fr auto;
     }
     
     .right-panel {
+        height: 400px;
+        border-left: none;
         border-top: 1px solid var(--border);
     }
 }
+
