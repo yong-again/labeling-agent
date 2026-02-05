@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DINO-SAM Labeling Agent</title>
     <meta name="description" content="Auto-labeling with Grounding DINO + SAM">
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=2">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -37,109 +37,158 @@
         </header>
 
         <!-- Main Content -->
+        <!-- Tab Navigation -->
+        <div class="tab-nav">
+            <button class="tab-btn active" data-tab="tab-upload">1. Upload & Labeling</button>
+            <button class="tab-btn" data-tab="tab-result" disabled id="btnTabResult">2. Result Verification</button>
+        </div>
+
+        <!-- Main Content -->
         <main class="main-content">
-            <!-- Left Panel: Upload & Controls -->
-            <aside class="panel left-panel">
-                <div class="panel-section">
-                    <h2>📤 Image Upload</h2>
-                    <div class="upload-zone" id="uploadZone">
-                        <div class="upload-icon">📁</div>
-                        <p>Drag & drop images here</p>
-                        <p class="upload-hint">or click to browse</p>
-                        <input type="file" id="fileInput" accept="image/*" multiple hidden>
+            
+            <!-- TAB 1: Upload & Labeling -->
+            <div id="tab-upload" class="tab-pane active">
+                <div class="upload-container">
+                    <div class="panel-section">
+                        <h2>📤 Image Upload</h2>
+                        <div class="upload-mode-toggle">
+                            <label><input type="radio" name="uploadMode" value="single" checked> 단일</label>
+                            <label><input type="radio" name="uploadMode" value="batch"> 배치 (zip / 2장+)</label>
+                        </div>
+                        <div class="upload-zone" id="uploadZone">
+                            <div class="upload-icon">📁</div>
+                            <p id="uploadZoneText">Drag & drop images here</p>
+                            <p class="upload-hint">or click to browse</p>
+                            <input type="file" id="fileInput" accept="image/*" multiple hidden>
+                        </div>
+                        <div class="batch-progress" id="batchProgress" hidden>
+                            <div class="batch-stage" id="batchStage">대기 중</div>
+                            <div class="batch-progress-bar"><div class="batch-progress-fill" id="batchProgressFill"></div></div>
+                            <div class="batch-progress-text" id="batchProgressText">0 / 0</div>
+                        </div>
                     </div>
-                </div>
 
-                <div class="panel-section">
-                    <h2>✏️ Prompt</h2>
-                    <div class="prompt-input-wrap">
-                        <textarea id="promptInput" placeholder="Enter detection prompt (e.g., 'person. car. dog')"></textarea>
-                        <div class="prompt-hint">Separate classes with periods (.)</div>
-                    </div>
-                </div>
+                    <div class="settings-grid">
+                        <div class="panel-section">
+                            <h2>✏️ Prompt</h2>
+                            <div class="prompt-input-wrap">
+                                <textarea id="promptInput" placeholder="Enter detection prompt (e.g., 'person. car. dog')"></textarea>
+                                <div class="prompt-hint">Separate classes with periods (.)</div>
+                            </div>
+                        </div>
 
-                <div class="panel-section">
-                    <h2>⚙️ Settings</h2>
-                    <div class="setting-item">
-                        <label for="confidenceSlider">Confidence: <span id="confidenceValue">0.35</span></label>
-                        <input type="range" id="confidenceSlider" min="0.1" max="0.9" step="0.05" value="0.35">
+                        <div class="panel-section">
+                            <h2>⚙️ Settings</h2>
+                            <div class="setting-item">
+                                <label for="confidenceSlider">Confidence: <span id="confidenceValue">0.35</span></label>
+                                <input type="range" id="confidenceSlider" min="0.1" max="0.9" step="0.05" value="0.35">
+                            </div>
+                            <div class="setting-item">
+                                <label for="formatSelect">Export Format</label>
+                                <select id="formatSelect">
+                                    <option value="coco">COCO Format</option>
+                                    <option value="yolo">YOLO Format</option>
+                                </select>
+                            </div>
+                            <div class="setting-item">
+                                <label for="clientRenderCheckbox">Client Render (test)</label>
+                                <input type="checkbox" id="clientRenderCheckbox" title="모델 output을 웹에서 직접 렌더링 (오버레이 이미지 대신)">
+                            </div>
+                        </div>
                     </div>
-                    <div class="setting-item">
-                        <label for="formatSelect">Export Format</label>
-                        <select id="formatSelect">
-                            <option value="coco">COCO Format</option>
-                            <option value="yolo">YOLO Format</option>
-                        </select>
-                    </div>
-                </div>
 
-                <div class="panel-section">
-                    <button class="btn btn-primary btn-full" id="labelBtn" disabled>
-                        🚀 Run Labeling
-                    </button>
-                </div>
-            </aside>
-
-            <!-- Center: Image Canvas -->
-            <section class="canvas-section">
-                <div class="canvas-container" id="canvasContainer">
-                    <div class="canvas-placeholder" id="canvasPlaceholder">
-                        <div class="placeholder-icon">🖼️</div>
-                        <p>Upload an image to start</p>
-                    </div>
-                    <canvas id="imageCanvas"></canvas>
-                    <div class="loading-overlay" id="loadingOverlay" hidden>
-                        <div class="spinner"></div>
-                        <p>Processing...</p>
-                    </div>
-                </div>
-                
-                <!-- HITL Controls -->
-                <div class="hitl-controls" id="hitlControls" hidden>
-                    <div class="hitl-info">
-                        <span class="hitl-label">Review:</span>
-                        <span class="hitl-count" id="hitlCount">0 objects detected</span>
-                    </div>
-                    <div class="hitl-buttons">
-                        <button class="btn btn-reject" id="rejectBtn" title="Reject (Bad Quality)">
-                            ❌ Reject
+                    <div class="panel-section label-actions" id="labelActions">
+                        <button class="btn btn-primary btn-full label-btn-large" id="labelBtn" disabled>
+                            🚀 Run Labeling
                         </button>
-                        <button class="btn btn-approve" id="approveBtn" title="Approve (Good Quality)">
-                            ✅ Approve
+                        <button class="btn btn-primary btn-full label-btn-large" id="batchLabelBtn" disabled style="display: none;">
+                            🚀 Batch Labeling
                         </button>
                     </div>
                 </div>
-            </section>
+            </div>
 
-            <!-- Right Panel: Results & Export -->
-            <aside class="panel right-panel">
-                <div class="panel-section">
-                    <h2>📊 Detection Results</h2>
-                    <div class="results-list" id="resultsList">
-                        <div class="results-empty">No results yet</div>
-                    </div>
-                </div>
+            <!-- TAB 2: Result Verification -->
+            <div id="tab-result" class="tab-pane">
+                <div class="result-layout">
+                    
+                    <!-- Center: Image Canvas -->
+                    <section class="canvas-section">
+                        <div class="batch-nav" id="batchNav" hidden>
+                            <button type="button" class="btn btn-secondary" id="batchPrevBtn" title="이전">◀ 이전</button>
+                            <span class="batch-nav-text" id="batchNavText">1 / 1</span>
+                            <button type="button" class="btn btn-secondary" id="batchNextBtn" title="다음">다음 ▶</button>
+                        </div>
+                        <div class="canvas-container" id="canvasContainer">
+                            <div class="canvas-placeholder" id="canvasPlaceholder">
+                                <div class="placeholder-icon">🖼️</div>
+                                <p>Upload an image to start</p>
+                            </div>
+                            <canvas id="imageCanvas"></canvas>
+                            <div class="loading-overlay" id="loadingOverlay" hidden>
+                                <div class="spinner"></div>
+                                <p>Processing...</p>
+                            </div>
+                        </div>
+                        
+                        <!-- HITL Controls -->
+                        <div class="hitl-controls" id="hitlControls" hidden>
+                            <div class="hitl-info">
+                                <span class="hitl-label">Review:</span>
+                                <span class="hitl-count" id="hitlCount">0 objects detected</span>
+                            </div>
+                            <div class="hitl-buttons">
+                                <button class="btn btn-reject" id="rejectBtn" title="Reject (Bad Quality)">
+                                    ❌ Reject
+                                </button>
+                                <button class="btn btn-approve" id="approveBtn" title="Approve (Good Quality)">
+                                    ✅ Approve
+                                </button>
+                            </div>
+                        </div>
+                    </section>
 
-                <div class="panel-section">
-                    <h2>💾 Export</h2>
-                    <button class="btn btn-secondary btn-full" id="exportBtn" disabled>
-                        Export Labels
-                    </button>
-                </div>
+                    <!-- Right Panel: Results & Export -->
+                    <aside class="panel right-panel">
+                        <div class="panel-section batch-results-header" id="batchResultsHeader" hidden>
+                            <h2>📋 Batch Results</h2>
+                            <p class="batch-results-summary" id="batchResultsSummary">0 images labeled</p>
+                        </div>
+                        <div class="panel-section">
+                            <h2>📊 Detection Results</h2>
+                            <div class="results-list" id="resultsList">
+                                <div class="results-empty">No results yet</div>
+                            </div>
+                        </div>
 
-                <div class="panel-section">
-                    <h2>📝 Review Queue</h2>
-                    <div class="queue-list" id="queueList">
-                        <div class="queue-empty">No pending reviews</div>
-                    </div>
+                        <div class="panel-section">
+                            <h2>💾 Export</h2>
+                            <div class="export-buttons">
+                                <button class="btn btn-secondary btn-full" id="exportBtn" disabled>
+                                    Export Labels
+                                </button>
+                                <button class="btn btn-secondary btn-full" id="exportCurrentBtn" disabled style="display: none;" title="현재 보고 있는 이미지만 내보내기">
+                                    Export Current
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="panel-section">
+                            <h2>📝 Review Queue</h2>
+                            <div class="queue-list" id="queueList">
+                                <div class="queue-empty">No pending reviews</div>
+                            </div>
+                        </div>
+                    </aside>
                 </div>
-            </aside>
+            </div>
+
         </main>
 
         <!-- Toast Notification -->
         <div class="toast" id="toast"></div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=2"></script>
 </body>
 </html>

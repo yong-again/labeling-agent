@@ -9,9 +9,16 @@
 const state = {
     currentImageId: null,
     currentImage: null,
+    currentImageObjectUrl: null,  // createObjectURL로 생성, 메모리 해제용
     labelingResult: null,
     isProcessing: false,
     pointSegmentMode: false,  // 클릭 세그멘테이션 모드
+    labelingRequestId: 0,     // 요청 순서 추적 (race condition 방지)
+    uploadMode: 'single',     // 'single' | 'batch'
+    batchJobId: null,         // 배치 작업 ID
+    batchImageIds: [],        // 배치 이미지 ID 목록
+    batchResults: [],         // 배치 라벨링 결과 [{ image_id, result }, ...]
+    batchResultIndex: 0,      // 현재 보고 있는 배치 결과 인덱스
 };
 
 const DEBUG_MASK_RENDER = true;
@@ -24,19 +31,38 @@ const elements = {
     // Upload
     uploadZone: document.getElementById('uploadZone'),
     fileInput: document.getElementById('fileInput'),
-    
+    uploadZoneText: document.getElementById('uploadZoneText'),
+    batchProgress: document.getElementById('batchProgress'),
+    batchStage: document.getElementById('batchStage'),
+    batchProgressFill: document.getElementById('batchProgressFill'),
+    batchProgressText: document.getElementById('batchProgressText'),
+    batchLabelBtn: document.getElementById('batchLabelBtn'),
+    batchNav: document.getElementById('batchNav'),
+    batchPrevBtn: document.getElementById('batchPrevBtn'),
+    batchNextBtn: document.getElementById('batchNextBtn'),
+    batchNavText: document.getElementById('batchNavText'),
+    batchResultsHeader: document.getElementById('batchResultsHeader'),
+    batchResultsSummary: document.getElementById('batchResultsSummary'),
+
+    // Tabs
+    tabBtns: document.querySelectorAll('.tab-btn'),
+    tabPanes: document.querySelectorAll('.tab-pane'),
+    btnTabResult: document.getElementById('btnTabResult'),
+
     // Prompt & Settings
     promptInput: document.getElementById('promptInput'),
     confidenceSlider: document.getElementById('confidenceSlider'),
     confidenceValue: document.getElementById('confidenceValue'),
     formatSelect: document.getElementById('formatSelect'),
+    clientRenderCheckbox: document.getElementById('clientRenderCheckbox'),
     
     // Buttons
     labelBtn: document.getElementById('labelBtn'),
     approveBtn: document.getElementById('approveBtn'),
     rejectBtn: document.getElementById('rejectBtn'),
     exportBtn: document.getElementById('exportBtn'),
-    
+    exportCurrentBtn: document.getElementById('exportCurrentBtn'),
+
     // Canvas
     canvasContainer: document.getElementById('canvasContainer'),
     canvasPlaceholder: document.getElementById('canvasPlaceholder'),
@@ -69,16 +95,29 @@ document.addEventListener('DOMContentLoaded', () => {
     if (DEBUG_MASK_RENDER) {
         console.log('[mask-debug] app.js loaded');
     }
+    updateUploadZoneText();
     initializeEventListeners();
     loadStats();
     loadPendingQueue();
 });
 
 function initializeEventListeners() {
+    // Tabs
+    initializeTabs();
+
+    // Upload Mode Toggle
+    document.querySelectorAll('input[name="uploadMode"]').forEach(radio => {
+        radio.addEventListener('change', (e) => {
+            state.uploadMode = e.target.value;
+            updateUploadZoneText();
+            resetBatchState();
+        });
+    });
+
     // Upload Zone
     elements.uploadZone.addEventListener('click', () => elements.fileInput.click());
     elements.fileInput.addEventListener('change', handleFileSelect);
-    
+
     // Drag & Drop
     elements.uploadZone.addEventListener('dragover', (e) => {
         e.preventDefault();
@@ -94,27 +133,156 @@ function initializeEventListeners() {
         elements.confidenceValue.textContent = e.target.value;
     });
     
-    // Label Button
+    // Label Buttons
     elements.labelBtn.addEventListener('click', runLabeling);
+    elements.batchLabelBtn?.addEventListener('click', runBatchLabeling);
+    elements.batchPrevBtn?.addEventListener('click', () => showBatchResultIndex(state.batchResultIndex - 1));
+    elements.batchNextBtn?.addEventListener('click', () => showBatchResultIndex(state.batchResultIndex + 1));
     
     // HITL Buttons
     elements.approveBtn.addEventListener('click', () => submitFeedback('approved'));
     elements.rejectBtn.addEventListener('click', () => submitFeedback('rejected'));
     
-    // Export Button
-    elements.exportBtn.addEventListener('click', exportLabels);
+    // Export Buttons
+    elements.exportBtn.addEventListener('click', () => exportLabels(true));
+    elements.exportCurrentBtn?.addEventListener('click', () => exportLabels(false));
     
     // Canvas click for point segmentation
     elements.imageCanvas.addEventListener('click', handleCanvasClick);
+}
+
+function initializeTabs() {
+    elements.tabBtns.forEach(btn => {
+        btn.addEventListener('click', () => {
+            const targetTab = btn.dataset.tab;
+            if (btn.disabled) return;
+            switchTab(targetTab);
+        });
+    });
+}
+
+function switchTab(tabId) {
+    // Update Buttons
+    elements.tabBtns.forEach(btn => {
+        if (btn.dataset.tab === tabId) {
+            btn.classList.add('active');
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+
+    // Update Panes
+    elements.tabPanes.forEach(pane => {
+        if (pane.id === tabId) {
+            pane.classList.add('active');
+        } else {
+            pane.classList.remove('active');
+        }
+    });
 }
 
 // ========================================
 // Image Upload
 // ========================================
 
+function updateUploadZoneText() {
+    if (!elements.uploadZoneText) return;
+    if (state.uploadMode === 'batch') {
+        elements.uploadZoneText.textContent = 'Drag & drop zip or multiple images (2+)';
+        elements.fileInput.setAttribute('accept', 'image/*,.zip');
+        elements.fileInput.removeAttribute('multiple');
+        elements.fileInput.setAttribute('multiple', 'multiple');
+        if (elements.labelBtn) elements.labelBtn.style.display = 'none';
+        if (elements.batchLabelBtn) elements.batchLabelBtn.style.display = '';
+    } else {
+        elements.uploadZoneText.textContent = 'Drag & drop images here';
+        elements.fileInput.setAttribute('accept', 'image/*');
+        elements.fileInput.removeAttribute('multiple');
+        if (elements.labelBtn) elements.labelBtn.style.display = '';
+        if (elements.batchLabelBtn) elements.batchLabelBtn.style.display = 'none';
+    }
+}
+
+function resetBatchState() {
+    state.batchJobId = null;
+    state.batchImageIds = [];
+    state.batchResults = [];
+    state.batchResultIndex = 0;
+    elements.batchLabelBtn?.setAttribute('disabled', 'disabled');
+    elements.batchProgress?.setAttribute('hidden', 'hidden');
+    elements.batchNav?.setAttribute('hidden', 'hidden');
+    elements.batchResultsHeader?.setAttribute('hidden', 'hidden');
+    updateExportButtonText(0);
+    if (elements.exportCurrentBtn) {
+        elements.exportCurrentBtn.style.display = 'none';
+        elements.exportCurrentBtn.disabled = true;
+    }
+    // Disable Result Tab if no single result either
+    if (!state.labelingResult) {
+        elements.btnTabResult.disabled = true;
+    }
+}
+
+function updateExportButtonText(batchCount) {
+    if (!elements.exportBtn) return;
+    elements.exportBtn.textContent = batchCount > 0
+        ? `Export All (${batchCount})`
+        : 'Export Labels';
+    if (elements.exportCurrentBtn) {
+        elements.exportCurrentBtn.style.display = batchCount > 0 ? '' : 'none';
+        elements.exportCurrentBtn.disabled = false;
+    }
+}
+
+async function showBatchResultIndex(index) {
+    if (!state.batchResults.length) return;
+    const i = Math.max(0, Math.min(index, state.batchResults.length - 1));
+    state.batchResultIndex = i;
+    const item = state.batchResults[i];
+    if (!item) return;
+
+    state.currentImageId = item.image_id;
+    state.labelingResult = item.result;
+
+    if (item.result.overlay_image) {
+        drawResults(item.result);
+    } else {
+        try {
+            const imgResp = await fetch(`/api/image/${item.image_id}`);
+            if (imgResp.ok) {
+                const blob = await imgResp.blob();
+                const url = URL.createObjectURL(blob);
+                if (state.currentImageObjectUrl) URL.revokeObjectURL(state.currentImageObjectUrl);
+                state.currentImageObjectUrl = url;
+                state.currentImage = null;
+                drawResults(item.result);
+            }
+        } catch (e) {
+            console.error('Failed to load batch image:', e);
+        }
+    }
+
+    updateResultsList(item.result);
+    if (elements.batchNavText) elements.batchNavText.textContent = `${i + 1} / ${state.batchResults.length}`;
+    if (elements.batchPrevBtn) elements.batchPrevBtn.disabled = i <= 0;
+    if (elements.batchNextBtn) elements.batchNextBtn.disabled = i >= state.batchResults.length - 1;
+}
+
+function updateBatchProgress(stage, current, total, message) {
+    if (!elements.batchProgress) return;
+    elements.batchProgress.removeAttribute('hidden');
+    if (elements.batchStage) elements.batchStage.textContent = message || stage;
+    const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+    if (elements.batchProgressFill) elements.batchProgressFill.style.width = pct + '%';
+    if (elements.batchProgressText) elements.batchProgressText.textContent = `${current} / ${total}`;
+}
+
 function handleFileSelect(e) {
     const files = e.target.files;
-    if (files.length > 0) {
+    if (files.length === 0) return;
+    if (state.uploadMode === 'batch') {
+        batchUpload(files);
+    } else {
         uploadImage(files[0]);
     }
 }
@@ -122,9 +290,12 @@ function handleFileSelect(e) {
 function handleDrop(e) {
     e.preventDefault();
     elements.uploadZone.classList.remove('dragover');
-    
+
     const files = e.dataTransfer.files;
-    if (files.length > 0) {
+    if (files.length === 0) return;
+    if (state.uploadMode === 'batch') {
+        batchUpload(files);
+    } else {
         uploadImage(files[0]);
     }
 }
@@ -171,56 +342,212 @@ async function uploadImage(file) {
     }
 }
 
-function displayImage(file) {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        const img = new Image();
-        img.onload = () => {
-            const canvas = elements.imageCanvas;
-            const ctx = canvas.getContext('2d');
-            
-            // Calculate canvas size
-            const maxWidth = elements.canvasContainer.clientWidth - 48;
-            const maxHeight = elements.canvasContainer.clientHeight - 48;
-            
-            let width = img.width;
-            let height = img.height;
-            
-            if (width > maxWidth) {
-                height = (height * maxWidth) / width;
-                width = maxWidth;
-            }
-            if (height > maxHeight) {
-                width = (width * maxHeight) / height;
-                height = maxHeight;
-            }
-            
-            canvas.width = width;
-            canvas.height = height;
-            canvas.style.display = 'block';
-            
-            // Avoid smoothing artifacts on scaled masks/images
-            ctx.imageSmoothingEnabled = false;
-            ctx.drawImage(img, 0, 0, width, height);
-            
-            // Store original dimensions
-            canvas.dataset.originalWidth = img.width;
-            canvas.dataset.originalHeight = img.height;
-            
-            if (DEBUG_MASK_RENDER) {
-                console.log('[mask-debug] image size', {
-                    originalWidth: img.width,
-                    originalHeight: img.height,
-                    canvasWidth: canvas.width,
-                    canvasHeight: canvas.height,
-                });
-            }
+async function batchUpload(files) {
+    if (state.uploadMode !== 'batch') return;
+    const isZip = files.length === 1 && (files[0].name || '').toLowerCase().endsWith('.zip');
+    const isMultiImage = files.length >= 2 && Array.from(files).every(f => (f.type || '').startsWith('image/'));
+    if (!isZip && !isMultiImage) {
+        showToast('배치: zip 파일 1개 또는 이미지 2장 이상을 업로드하세요', 'error');
+        return;
+    }
 
-            elements.canvasPlaceholder.style.display = 'none';
-        };
-        img.src = e.target.result;
+    showLoading(true);
+    resetBatchState();
+    updateBatchProgress('upload', 0, 1, '업로드 중...');
+
+    const formData = new FormData();
+    for (let i = 0; i < files.length; i++) {
+        formData.append('files', files[i]);
+    }
+
+    try {
+        const response = await fetch('/api/batch/upload', {
+            method: 'POST',
+            body: formData,
+        });
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.detail || `Upload failed (${response.status})`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let jobId = null;
+        let imageIds = [];
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop() || '';
+
+            for (const block of lines) {
+                if (!block.trim()) continue;
+                const eventMatch = block.match(/^event:\s*(.+)$/m);
+                const dataMatch = block.match(/^data:\s*(.+)$/m);
+                const event = eventMatch ? eventMatch[1].trim() : 'message';
+                const dataStr = dataMatch ? dataMatch[1].trim() : '{}';
+                let data = {};
+                try {
+                    data = JSON.parse(dataStr);
+                } catch (_) {}
+
+                if (event === 'stage') {
+                    const msg = data.message || data.stage || '';
+                    updateBatchProgress(data.stage || 'stage', 0, 1, msg);
+                } else if (event === 'progress') {
+                    updateBatchProgress(data.stage, data.current || 0, data.total || 1, `${data.stage || ''}: ${(data.current || 0)} / ${data.total || 1}`);
+                } else if (event === 'done') {
+                    jobId = data.job_id;
+                    imageIds = data.image_ids || [];
+                    state.batchJobId = jobId;
+                    state.batchImageIds = imageIds;
+                    updateBatchProgress('done', imageIds.length, imageIds.length, `업로드 완료: ${imageIds.length}장`);
+                    elements.batchLabelBtn?.removeAttribute('disabled');
+                    showToast(`배치 업로드 완료: ${imageIds.length}장`, 'success');
+                    if (imageIds.length > 0) {
+                        state.currentImageId = imageIds[0];
+                        const imgResp = await fetch(`/api/image/${imageIds[0]}`);
+                        if (imgResp.ok) {
+                            const blob = await imgResp.blob();
+                            displayImage(blob);
+                        }
+                    }
+                } else if (event === 'error') {
+                    throw new Error(data.message || 'Batch upload failed');
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Batch upload error:', error);
+        showToast(error.message || 'Batch upload failed', 'error');
+        resetBatchState();
+    } finally {
+        showLoading(false);
+    }
+}
+
+async function runBatchLabeling() {
+    if (!state.batchJobId) {
+        showToast('배치 업로드를 먼저 완료하세요', 'error');
+        return;
+    }
+    const prompt = elements.promptInput.value.trim();
+    if (!prompt) {
+        showToast('Please enter a detection prompt', 'error');
+        return;
+    }
+
+    showLoading(true);
+    elements.batchLabelBtn?.setAttribute('disabled', 'disabled');
+    updateBatchProgress('labeling', 0, state.batchImageIds.length, '라벨링 시작...');
+
+    try {
+        const response = await fetch('/api/batch/label', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                job_id: state.batchJobId,
+                prompt,
+                confidence_threshold: parseFloat(elements.confidenceSlider?.value || 0.35),
+                use_client_render: elements.clientRenderCheckbox?.checked ?? false,
+            }),
+        });
+        if (!response.ok) {
+            throw new Error(`Labeling failed (${response.status})`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let completed = 0;
+        const total = state.batchImageIds.length;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop() || '';
+
+            for (const block of lines) {
+                if (!block.trim()) continue;
+                const eventMatch = block.match(/^event:\s*(.+)$/m);
+                const dataMatch = block.match(/^data:\s*(.+)$/m);
+                const event = eventMatch ? eventMatch[1].trim() : 'message';
+                const dataStr = dataMatch ? dataMatch[1].trim() : '{}';
+                let data = {};
+                try {
+                    data = JSON.parse(dataStr);
+                } catch (_) {}
+
+                if (event === 'progress') {
+                    completed = data.current || completed;
+                    const msg = data.skipped ? `건너뜀: ${data.image_id}` : `라벨링: ${data.current} / ${total}`;
+                    updateBatchProgress('labeling', completed, total, msg);
+                } else if (event === 'done') {
+                    const results = data.results || [];
+                    const count = data.count || results.length;
+                    state.batchResults = results;
+                    state.batchResultIndex = 0;
+                    updateBatchProgress('done', total, total, `라벨링 완료: ${count}장`);
+                    elements.exportBtn?.removeAttribute('disabled');
+                    showToast(`Batch labeling 완료: ${count}장`, 'success');
+                    if (results.length > 0) {
+                        elements.batchNav?.removeAttribute('hidden');
+                        elements.batchResultsHeader?.removeAttribute('hidden');
+                        if (elements.batchResultsSummary) elements.batchResultsSummary.textContent = `${results.length} images labeled`;
+                        updateExportButtonText(results.length);
+                        showBatchResultIndex(0);
+                        
+                        // Switch to Result Tab
+                        elements.btnTabResult.disabled = false;
+                        switchTab('tab-result');
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        console.error('Batch labeling error:', error);
+        showToast(error.message || 'Batch labeling failed', 'error');
+    } finally {
+        showLoading(false);
+        elements.batchLabelBtn?.removeAttribute('disabled');
+    }
+}
+
+function displayImage(file) {
+    if (state.currentImageObjectUrl) {
+        URL.revokeObjectURL(state.currentImageObjectUrl);
+        state.currentImageObjectUrl = null;
+    }
+    const url = URL.createObjectURL(file);
+    state.currentImageObjectUrl = url;
+    const img = new Image();
+    img.onload = () => {
+        const canvas = elements.imageCanvas;
+        const ctx = canvas.getContext('2d');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        canvas.style.display = 'block';
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0);
+        canvas.dataset.originalWidth = img.width;
+        canvas.dataset.originalHeight = img.height;
+        if (DEBUG_MASK_RENDER) {
+            console.log('[mask-debug] image size (원본 유지):', { width: img.width, height: img.height });
+        }
+        elements.canvasPlaceholder.style.display = 'none';
     };
-    reader.readAsDataURL(file);
+    img.onerror = () => {
+        URL.revokeObjectURL(url);
+        state.currentImageObjectUrl = null;
+        showToast('Failed to load image', 'error');
+    };
+    img.src = url;
 }
 
 // ========================================
@@ -241,7 +568,8 @@ async function runLabeling() {
     
     showLoading(true);
     state.isProcessing = true;
-    
+    const requestId = ++state.labelingRequestId;
+
     try {
         const response = await fetch('/api/label', {
             method: 'POST',
@@ -250,6 +578,7 @@ async function runLabeling() {
                 image_id: state.currentImageId,
                 prompt: prompt,
                 confidence_threshold: parseFloat(elements.confidenceSlider.value),
+                use_client_render: elements.clientRenderCheckbox?.checked ?? false,
             }),
         });
         
@@ -263,7 +592,8 @@ async function runLabeling() {
         if (!response.ok) {
             throw new Error(data.detail || `Labeling failed (${response.status})`);
         }
-        
+        if (requestId !== state.labelingRequestId) return; // 새 요청이 이미 시작됨 (race 방지)
+
         state.labelingResult = data.result;
         
         // Draw results on canvas
@@ -281,6 +611,10 @@ async function runLabeling() {
         
         showToast(`Found ${data.result.num_objects} objects`, 'success');
         
+        // Enable and Switch to Result Tab
+        elements.btnTabResult.disabled = false;
+        switchTab('tab-result');
+        
     } catch (error) {
         console.error('Labeling error:', error);
         showToast(error.message || 'Labeling failed', 'error');
@@ -296,7 +630,7 @@ function drawResults(result) {
     const canvas = elements.imageCanvas;
     const ctx = canvas.getContext('2d');
     
-    // 서버에서 생성한 오버레이 이미지가 있으면 직접 표시
+    // 서버에서 생성한 오버레이 이미지가 있으면 직접 표시 (원본 해상도 유지)
     if (result.overlay_image) {
         console.log('[overlay] 서버 생성 오버레이 이미지 사용:', result.overlay_image);
         
@@ -304,13 +638,12 @@ function drawResults(result) {
         img.onload = () => {
             canvas.width = img.width;
             canvas.height = img.height;
-            ctx.imageSmoothingEnabled = false;
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
             ctx.drawImage(img, 0, 0);
-            
-            console.log('[overlay] 오버레이 이미지 표시 완료:', {
-                width: img.width,
-                height: img.height
-            });
+            canvas.dataset.originalWidth = img.width;
+            canvas.dataset.originalHeight = img.height;
+            console.log('[overlay] 오버레이 이미지 표시 완료 (원본 유지):', [img.width, img.height]);
         };
         img.onerror = () => {
             console.error('[overlay] 오버레이 이미지 로드 실패:', result.overlay_image);
@@ -320,34 +653,31 @@ function drawResults(result) {
         return;
     }
     
-    // 폴백: 원본 방식 (클라이언트 렌더링)
-    if (!result.boxes_percent) return;
-    
-    if (state.currentImage) {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            const img = new Image();
-            img.onload = () => {
-                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                
-                // Draw masks first (underneath boxes)
-                if (result.masks_raw && result.masks_raw.length > 0) {
-                    if (DEBUG_MASK_RENDER) {
-                        console.log('[mask-debug] drawMasks called', {
-                            masksCount: result.masks_raw.length,
-                            canvasWidth: canvas.width,
-                            canvasHeight: canvas.height,
-                        });
-                    }
-                    drawMasks(ctx, result, canvas);
-                } else {
-                    // If masks are loaded, draw boxes after; otherwise draw immediately
-                    drawBoxes(ctx, result, canvas);
+    // 폴백: 원본 방식 (클라이언트 렌더링, 또는 검출 없음 시 원본 이미지 표시)
+    const imageUrl = state.currentImageObjectUrl || (state.currentImage && URL.createObjectURL(state.currentImage));
+    if (imageUrl) {
+        const img = new Image();
+        img.onload = () => {
+            if (canvas.width !== img.width || canvas.height !== img.height) {
+                canvas.width = img.width;
+                canvas.height = img.height;
+            }
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            if (result.masks_raw && result.masks_raw.length > 0) {
+                if (DEBUG_MASK_RENDER) {
+                    console.log('[mask-debug] drawMasks called', {
+                        masksCount: result.masks_raw.length,
+                        canvasWidth: canvas.width,
+                        canvasHeight: canvas.height,
+                    });
                 }
-            };
-            img.src = e.target.result;
+                drawMasks(ctx, result, canvas);
+            } else {
+                drawBoxes(ctx, result, canvas);
+            }
         };
-        reader.readAsDataURL(state.currentImage);
+        img.onerror = () => showToast('Failed to load image for overlay', 'error');
+        img.src = imageUrl;
     }
 }
 
@@ -431,13 +761,12 @@ function drawMasks(ctx, result, canvas) {
 
 
 function drawBoxes(ctx, result, canvas) {
-    // 이미지 크기에 따른 스케일 (기준 600px)
-    const refSize = 600;
+    // 이미지 크기에 따른 스케일 (큰 이미지에서도 label text가 보이도록)
     const minDim = Math.min(canvas.width, canvas.height);
-    const scale = Math.max(0.5, Math.min(2, minDim / refSize));
-    const fontSize = Math.max(10, Math.round(14 * scale));
-    const labelHeight = Math.max(18, Math.round(24 * scale));
-    const padding = Math.max(4, Math.round(6 * scale));
+    const scale = Math.max(0.5, Math.min(6, minDim / 400));
+    const fontSize = Math.max(14, Math.min(72, Math.round(16 * scale)));
+    const labelHeight = Math.max(20, Math.min(80, Math.round(24 * scale)));
+    const padding = Math.max(4, Math.round(8 * scale));
     const lineWidth = Math.max(2, Math.round(3 * scale));
 
     result.boxes_percent.forEach((box, index) => {
@@ -560,6 +889,10 @@ async function submitFeedback(status) {
 function resetForNextImage() {
     state.currentImageId = null;
     state.currentImage = null;
+    if (state.currentImageObjectUrl) {
+        URL.revokeObjectURL(state.currentImageObjectUrl);
+        state.currentImageObjectUrl = null;
+    }
     state.labelingResult = null;
     
     elements.imageCanvas.style.display = 'none';
@@ -574,17 +907,30 @@ function resetForNextImage() {
 // Export
 // ========================================
 
-async function exportLabels() {
-    if (!state.currentImageId) return;
-    
+async function exportLabels(exportAll = true) {
+    // exportAll: true=전체 배치, false=현재 보고 있는 이미지만
+    let imageIds;
+    if (exportAll) {
+        imageIds = state.batchResults?.length
+            ? state.batchResults.map((r) => r.image_id)
+            : state.batchImageIds?.length
+                ? state.batchImageIds
+                : state.currentImageId
+                    ? [state.currentImageId]
+                    : [];
+    } else {
+        imageIds = state.currentImageId ? [state.currentImageId] : [];
+    }
+    if (!imageIds.length) return;
+
     try {
         const format = elements.formatSelect.value;
-        
+
         const response = await fetch('/api/export', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                image_ids: [state.currentImageId],
+                image_ids: imageIds,
                 format: format,
             }),
         });

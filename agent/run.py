@@ -9,11 +9,15 @@ from pathlib import Path
 
 from agent.config import Config
 from agent.pipeline import LabelingPipeline
+from agent.utils.logging_config import setup_logging
 
-# 로깅 설정
-logging.basicConfig(
+# 로깅 설정 (파일 저장 + 콘솔 색상)
+setup_logging(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    log_dir="./logs",
+    log_file="cli.log",
+    enable_file=True,
+    enable_console_color=True,
 )
 logger = logging.getLogger(__name__)
 
