@@ -39,22 +39,28 @@ graph TD
 ### 1. 필수 요구사항
 
 - Python 3.10 이상
-- CUDA 지원 GPU (권장, CPU도 가능하지만 느림)
+- CUDA 지원 GPU (권장)
 
 ### 2. 의존성 설치
 
 ```bash
 # 기본 패키지 설치
 pip install -r requirements.txt
+```
 
+```bash
 # Grounding DINO 설치
 pip install groundingdino-py
+```
 
+```bash
 # 또는 소스에서 설치:
 git clone https://github.com/IDEA-Research/GroundingDINO.git
 cd GroundingDINO
 pip install -e .
+```
 
+```bash
 # SAM 설치
 pip install git+https://github.com/facebookresearch/segment-anything.git
 ```
@@ -65,25 +71,40 @@ pip install git+https://github.com/facebookresearch/segment-anything.git
 
 ```bash
 mkdir -p weights
+```
 
+```bash
 # SwinB (권장, 고정밀도)
 wget https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha2/groundingdino_swinb_cogcoor.pth -O weights/groundingdino_swinb_cogcoor.pth
+```
 
+```bash
 # 또는 SwinT (경량)
 wget https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth -O weights/groundingdino_swint_ogc.pth
 ```
 
-#### SAM 체크포인트 (선택사항 - 자동 다운로드 지원)
+#### SAM 체크포인트
 
 ```bash
 # SAM ViT-H (기본, 가장 정확)
 wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth -O ~/.cache/sam/sam_vit_h.pth
+```
 
+```bash
 # SAM ViT-L (중간 크기)
 wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth -O ~/.cache/sam/sam_vit_l.pth
+```
 
+```bash
 # SAM ViT-B (가장 작음, 빠름)
 wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth -O ~/.cache/sam/sam_vit_b.pth
+```
+
+### Run download_weight.sh
+
+```bash
+chmod +x download_weight.sh
+./download_weight.sh
 ```
 
 ## 환경변수 설정
@@ -125,7 +146,7 @@ uvicorn agent.app:app --host 0.0.0.0 --port 8000 --reload
 - **프롬프트 입력**: 검출할 객체 (예: "phone, screen, crack")
 - **라벨링 실행**: 자동 객체 검출 및 세그멘테이션
 - **결과 확인**: Bounding Box 및 마스크 시각화
-- **HITL 피드백**: Pass/Fail 품질 검증
+- ~~**HITL 피드백**: Pass/Fail 품질 검증~~
 - **라벨 내보내기**: COCO/YOLO 포맷
 
 ### 2. CLI 실행
@@ -333,7 +354,7 @@ boxes_xyxy = cxcywh_to_xyxy(
 boxes_back = xyxy_to_cxcywh(boxes_xyxy, 1920, 1080, normalize=True)
 ```
 
-### 파이프라인 (DINO + SAM)
+### 파이프라인
 
 ```python
 from agent.config import Config
@@ -471,3 +492,10 @@ MIT License
 
 - [Grounding DINO](https://github.com/IDEA-Research/GroundingDINO)
 - [Segment Anything Model (SAM)](https://github.com/facebookresearch/segment-anything)
+
+## To Do List
+- [x] batch-labeling
+- [ ] model fine-tuning
+- [ ] HITL(Human in the loop)
+- [ ] labeling model selection
+- [ ] Multi-language support
